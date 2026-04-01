@@ -1,16 +1,13 @@
-From 47e0842bf051ce22a455487f697884ef36a3037d Mon Sep 17 00:00:00 2001
+From 2ce3135f12d94bda688b9978627261cc01f72672 Mon Sep 17 00:00:00 2001
 From: psyclyx <me@psyclyx.xyz>
 Date: Wed, 1 Apr 2026 04:49:28 -0700
 Subject: [PATCH] su: Add UID whitelist for per-app root access
 
 Check calling UID against /data/system/su_whitelist before allowing
 root access. Root and shell UIDs are always allowed. Non-whitelisted
-apps get the same "not allowed" error as before, giving no indication
-that su exists.
+apps get the same "not allowed" error, giving no indication su exists.
 
-The whitelist is managed by a settings panel in LineageParts.
-
-Change-Id: Ib6880c968bd0fab71e384b68a93934632becc90a
+Change-Id: I7a9360d9f7407e9ddcc13b5626b70a3513193c8c
 ---
  su/su.cpp | 24 +++++++++++++++++++++++-
  1 file changed, 23 insertions(+), 1 deletion(-)
