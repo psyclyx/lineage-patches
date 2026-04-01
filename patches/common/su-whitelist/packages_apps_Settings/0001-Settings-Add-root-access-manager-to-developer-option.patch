@@ -1,4 +1,4 @@
-From 35a28870c6eccc1151f61978bbd81fcf75376473 Mon Sep 17 00:00:00 2001
+From 0b4bfe4dbde9bef20e7afaa69ad2c0a3f0db8f36 Mon Sep 17 00:00:00 2001
 From: psyclyx <me@psyclyx.xyz>
 Date: Wed, 1 Apr 2026 05:34:42 -0700
 Subject: [PATCH] Settings: Add root access manager to developer options
@@ -10,16 +10,19 @@ Add SuAccessFragment with per-app toggles for root (su) access.
 Manages /data/system/su_whitelist which the su binary checks.
 Only shown when /system/xbin/su exists.
 
-Pure AOSP — no LineageOS-specific dependencies.
+Features:
+- Alphabetical section headers (A, B, C...)
+- "Show system" / "Hide system" toggle in overflow menu
+- Pure AOSP — no LineageOS-specific dependencies
 
-Change-Id: I413213116c88b5f9151d6ede7d7554f8c35af04e
+Change-Id: I3cf093df9e03f977ed27f58d0d39511514bf0b45
 ---
  res/values/strings.xml                        |   5 +
  res/xml/development_settings.xml              |   7 +-
  .../DevelopmentSettingsDashboardFragment.java |   1 +
- .../SuAccessPreferenceController.java         |  33 +++++
- .../development/su/SuAccessFragment.java      | 118 ++++++++++++++++++
- 5 files changed, 162 insertions(+), 2 deletions(-)
+ .../SuAccessPreferenceController.java         |  33 ++++
+ .../development/su/SuAccessFragment.java      | 175 ++++++++++++++++++
+ 5 files changed, 219 insertions(+), 2 deletions(-)
  create mode 100644 src/com/android/settings/development/SuAccessPreferenceController.java
  create mode 100644 src/com/android/settings/development/su/SuAccessFragment.java
 
@@ -108,10 +111,10 @@ index 00000000000..650cac37d1b
 +}
 diff --git a/src/com/android/settings/development/su/SuAccessFragment.java b/src/com/android/settings/development/su/SuAccessFragment.java
 new file mode 100644
-index 00000000000..999c19bc654
+index 00000000000..e595c222ee0
 --- /dev/null
 +++ b/src/com/android/settings/development/su/SuAccessFragment.java
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,175 @@
 +/*
 + * SPDX-License-Identifier: Apache-2.0
 + */
@@ -122,7 +125,11 @@ index 00000000000..999c19bc654
 +import android.content.pm.PackageManager;
 +import android.os.Bundle;
 +import android.util.Log;
++import android.view.Menu;
++import android.view.MenuInflater;
++import android.view.MenuItem;
 +
++import androidx.preference.PreferenceCategory;
 +import androidx.preference.PreferenceScreen;
 +import androidx.preference.SwitchPreferenceCompat;
 +
@@ -135,6 +142,7 @@ index 00000000000..999c19bc654
 +import java.io.FileWriter;
 +import java.io.IOException;
 +import java.io.PrintWriter;
++import java.util.ArrayList;
 +import java.util.Collections;
 +import java.util.HashSet;
 +import java.util.List;
@@ -143,13 +151,16 @@ index 00000000000..999c19bc654
 +public class SuAccessFragment extends SettingsPreferenceFragment {
 +    private static final String TAG = "SuAccessFragment";
 +    private static final String WHITELIST_PATH = "/data/system/su_whitelist";
++    private static final String KEY_SHOW_SYSTEM = "show_system";
++    private static final int MENU_SHOW_SYSTEM = Menu.FIRST;
 +
 +    private PackageManager mPm;
 +    private Set<Integer> mWhitelisted;
++    private boolean mShowSystem;
 +
 +    @Override
 +    public int getMetricsCategory() {
-+        return 0; // custom, no upstream metrics
++        return 0;
 +    }
 +
 +    @Override
@@ -157,7 +168,40 @@ index 00000000000..999c19bc654
 +        super.onCreate(savedInstanceState);
 +        mPm = getActivity().getPackageManager();
 +        mWhitelisted = readWhitelist();
++        if (savedInstanceState != null) {
++            mShowSystem = savedInstanceState.getBoolean(KEY_SHOW_SYSTEM, false);
++        }
++        setHasOptionsMenu(true);
 +        buildAppList();
++    }
++
++    @Override
++    public void onSaveInstanceState(Bundle outState) {
++        super.onSaveInstanceState(outState);
++        outState.putBoolean(KEY_SHOW_SYSTEM, mShowSystem);
++    }
++
++    @Override
++    public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
++        menu.add(Menu.NONE, MENU_SHOW_SYSTEM, Menu.NONE,
++                mShowSystem ? R.string.menu_hide_system : R.string.menu_show_system);
++        super.onCreateOptionsMenu(menu, inflater);
++    }
++
++    @Override
++    public boolean onOptionsItemSelected(MenuItem item) {
++        if (item.getItemId() == MENU_SHOW_SYSTEM) {
++            mShowSystem = !mShowSystem;
++            item.setTitle(mShowSystem ? R.string.menu_hide_system : R.string.menu_show_system);
++            buildAppList();
++            return true;
++        }
++        return super.onOptionsItemSelected(item);
++    }
++
++    private boolean isSystemApp(ApplicationInfo app) {
++        return (app.flags & ApplicationInfo.FLAG_SYSTEM) != 0
++                && (app.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0;
 +    }
 +
 +    private void buildAppList() {
@@ -172,14 +216,30 @@ index 00000000000..999c19bc654
 +            return la.compareToIgnoreCase(lb);
 +        });
 +
++        char lastSection = 0;
++        PreferenceCategory currentCategory = null;
++
 +        for (ApplicationInfo app : apps) {
-+            // Only show apps with a launcher icon (skip pure system internals)
-+            if (mPm.getLaunchIntentForPackage(app.packageName) == null) {
-+                continue;
++            boolean system = isSystemApp(app);
++
++            // Filter: always show apps with launcher icon; system apps only if toggled
++            if (system && !mShowSystem) continue;
++            if (!system && mPm.getLaunchIntentForPackage(app.packageName) == null) continue;
++
++            // Section headers by first letter
++            String label = mPm.getApplicationLabel(app).toString();
++            char section = Character.toUpperCase(label.charAt(0));
++            if (!Character.isLetter(section)) section = '#';
++
++            if (section != lastSection) {
++                lastSection = section;
++                currentCategory = new PreferenceCategory(getActivity());
++                currentCategory.setTitle(String.valueOf(section));
++                screen.addPreference(currentCategory);
 +            }
 +
 +            SwitchPreferenceCompat pref = new SwitchPreferenceCompat(getActivity());
-+            pref.setTitle(mPm.getApplicationLabel(app));
++            pref.setTitle(label);
 +            pref.setSummary(app.packageName);
 +            pref.setIcon(mPm.getApplicationIcon(app));
 +            pref.setChecked(mWhitelisted.contains(app.uid));
@@ -193,7 +253,7 @@ index 00000000000..999c19bc654
 +                writeWhitelist(mWhitelisted);
 +                return true;
 +            });
-+            screen.addPreference(pref);
++            currentCategory.addPreference(pref);
 +        }
 +    }
 +
