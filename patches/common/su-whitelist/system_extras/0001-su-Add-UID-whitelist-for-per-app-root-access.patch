@@ -1,0 +1,62 @@
+From 47e0842bf051ce22a455487f697884ef36a3037d Mon Sep 17 00:00:00 2001
+From: psyclyx <me@psyclyx.xyz>
+Date: Wed, 1 Apr 2026 04:49:28 -0700
+Subject: [PATCH] su: Add UID whitelist for per-app root access
+
+Check calling UID against /data/system/su_whitelist before allowing
+root access. Root and shell UIDs are always allowed. Non-whitelisted
+apps get the same "not allowed" error as before, giving no indication
+that su exists.
+
+The whitelist is managed by a settings panel in LineageParts.
+
+Change-Id: Ib6880c968bd0fab71e384b68a93934632becc90a
+---
+ su/su.cpp | 24 +++++++++++++++++++++++-
+ 1 file changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/su/su.cpp b/su/su.cpp
+index 1a1ab6bf..6ac808bf 100644
+--- a/su/su.cpp
++++ b/su/su.cpp
+@@ -26,6 +26,28 @@
+ 
+ #include <private/android_filesystem_config.h>
+ 
++#define SU_WHITELIST_PATH "/data/system/su_whitelist"
++
++static bool uid_is_whitelisted(uid_t uid) {
++    if (uid == AID_ROOT || uid == AID_SHELL) return true;
++
++    FILE* f = fopen(SU_WHITELIST_PATH, "r");
++    if (!f) return false;
++
++    char line[32];
++    while (fgets(line, sizeof(line), f)) {
++        char* end;
++        errno = 0;
++        unsigned long entry = strtoul(line, &end, 10);
++        if (errno == 0 && end != line && entry == uid) {
++            fclose(f);
++            return true;
++        }
++    }
++    fclose(f);
++    return false;
++}
++
+ void pwtoid(const char* tok, uid_t* uid, gid_t* gid) {
+     struct passwd* pw = getpwnam(tok);
+     if (pw) {
+@@ -81,7 +103,7 @@ void extract_uidgids(const char* uidgids, uid_t* uid, gid_t* gid, gid_t* gids, i
+ 
+ int main(int argc, char** argv) {
+     uid_t current_uid = getuid();
+-    if (current_uid != AID_ROOT && current_uid != AID_SHELL) error(1, 0, "not allowed");
++    if (!uid_is_whitelisted(current_uid)) error(1, 0, "not allowed");
+ 
+     // Handle -h and --help.
+     ++argv;
+-- 
+2.53.0
+

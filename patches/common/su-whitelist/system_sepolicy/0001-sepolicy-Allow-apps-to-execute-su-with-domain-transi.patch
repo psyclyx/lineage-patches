@@ -1,0 +1,40 @@
+From 3b88d0180042c358002f80d31bc4e656e89645b0 Mon Sep 17 00:00:00 2001
+From: psyclyx <me@psyclyx.xyz>
+Date: Wed, 1 Apr 2026 04:49:58 -0700
+Subject: [PATCH] sepolicy: Allow apps to execute su with domain transition
+
+Allow untrusted_app variants to execute su_exec and transition to
+the su domain. Access control is enforced by the su binary's
+UID whitelist, not by SELinux policy.
+
+Also allow the su domain to read its whitelist file from
+/data/system/su_whitelist.
+
+Change-Id: Ic80882fe5a910d6389f33f6c2b2cc85c0ebade4b
+---
+ private/su.te | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/private/su.te b/private/su.te
+index fae9b987e..993126609 100644
+--- a/private/su.te
++++ b/private/su.te
+@@ -2,6 +2,15 @@ userdebug_or_eng(`
+   typeattribute su coredomain;
+ 
+   domain_auto_trans(shell, su_exec, su)
++  # Allow apps to execute su (whitelist enforced by su binary itself)
++  domain_auto_trans(untrusted_app, su_exec, su)
++  domain_auto_trans(untrusted_app_25, su_exec, su)
++  domain_auto_trans(untrusted_app_27, su_exec, su)
++  domain_auto_trans(untrusted_app_29, su_exec, su)
++  domain_auto_trans(untrusted_app_30, su_exec, su)
++  domain_auto_trans(untrusted_app_32, su_exec, su)
++  # Allow su to read its whitelist
++  allow su system_data_file:file { read open getattr };
+   # Allow dumpstate to call su on userdebug / eng builds to collect
+   # additional information.
+   domain_auto_trans(dumpstate, su_exec, su)
+-- 
+2.53.0
+
