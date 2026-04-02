@@ -1,0 +1,100 @@
+From 6f4563f86b8ed21077c3930a80c2408c898bf5eb Mon Sep 17 00:00:00 2001
+From: psyclyx <me@psyclyx.xyz>
+Date: Wed, 1 Apr 2026 04:49:28 -0700
+Subject: [PATCH] su: Per-app root access with UID whitelist
+
+Simple su binary that checks caller UID against a world-readable
+whitelist at /data/local/su_whitelist (one UID per line).
+Root and shell are always allowed. Non-whitelisted callers get
+"not allowed" with no indication su exists.
+
+Installed to /system/bin/su (standard PATH location).
+Whitelist managed by Settings > Developer options > Root access.
+
+Change-Id: Id0463e5ba4cba271c3fd74fb03285c162f4f7295
+---
+ su/Android.bp |  1 -
+ su/su.cpp     | 30 ++++++++++++++++++++++++++----
+ 2 files changed, 26 insertions(+), 5 deletions(-)
+
+diff --git a/su/Android.bp b/su/Android.bp
+index 86e44fb4..19f64790 100644
+--- a/su/Android.bp
++++ b/su/Android.bp
+@@ -23,7 +23,6 @@ cc_binary {
+ 
+     srcs: ["su.cpp"],
+ 
+-    install_in_xbin: true,
+ 
+     header_libs: ["libcutils_headers"],
+ }
+diff --git a/su/su.cpp b/su/su.cpp
+index 1a1ab6bf..858a4733 100644
+--- a/su/su.cpp
++++ b/su/su.cpp
+@@ -26,6 +26,30 @@
+ 
+ #include <private/android_filesystem_config.h>
+ 
++/* World-readable whitelist file, one UID per line.
++ * Managed by Settings > Developer options > Root access. */
++#define SU_WHITELIST_PATH "/data/local/su_whitelist"
++
++static bool uid_is_whitelisted(uid_t uid) {
++    if (uid == AID_ROOT || uid == AID_SHELL) return true;
++
++    FILE* f = fopen(SU_WHITELIST_PATH, "r");
++    if (!f) return false;
++
++    char line[32];
++    while (fgets(line, sizeof(line), f)) {
++        char* end;
++        errno = 0;
++        unsigned long entry = strtoul(line, &end, 10);
++        if (errno == 0 && end != line && entry == uid) {
++            fclose(f);
++            return true;
++        }
++    }
++    fclose(f);
++    return false;
++}
++
+ void pwtoid(const char* tok, uid_t* uid, gid_t* gid) {
+     struct passwd* pw = getpwnam(tok);
+     if (pw) {
+@@ -60,7 +84,6 @@ void extract_uidgids(const char* uidgids, uid_t* uid, gid_t* gid, gid_t* gids, i
+     pwtoid(tok, uid, gid);
+     tok = strsep(&nexttok, ",");
+     if (!tok) {
+-        /* gid is already set above */
+         *gids_count = 0;
+         free(clobberablegids);
+         return;
+@@ -81,7 +104,7 @@ void extract_uidgids(const char* uidgids, uid_t* uid, gid_t* gid, gid_t* gids, i
+ 
+ int main(int argc, char** argv) {
+     uid_t current_uid = getuid();
+-    if (current_uid != AID_ROOT && current_uid != AID_SHELL) error(1, 0, "not allowed");
++    if (!uid_is_whitelisted(current_uid)) error(1, 0, "not allowed");
+ 
+     // Handle -h and --help.
+     ++argv;
+@@ -130,12 +153,11 @@ int main(int argc, char** argv) {
+     }
+ 
+     // Set up the arguments for exec.
+-    char* exec_args[argc + 1];  // Having too much space is fine.
++    char* exec_args[argc + 1];
+     size_t i = 0;
+     for (; *argv != NULL; ++i) {
+       exec_args[i] = *argv++;
+     }
+-    // Default to the standard shell.
+     if (i == 0) exec_args[i++] = const_cast<char*>("/system/bin/sh");
+     exec_args[i] = NULL;
+ 
+-- 
+2.53.0
+

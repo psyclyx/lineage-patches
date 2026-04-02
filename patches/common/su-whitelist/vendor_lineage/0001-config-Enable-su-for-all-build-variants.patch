@@ -1,21 +1,21 @@
-From d4f1e4ce3c8c7242cb58a57d35db3c7991d2ff0a Mon Sep 17 00:00:00 2001
+From a9be9119dbe57d9d97ddfafa3baa0dad0a4124a6 Mon Sep 17 00:00:00 2001
 From: psyclyx <me@psyclyx.xyz>
 Date: Wed, 1 Apr 2026 05:34:42 -0700
 Subject: [PATCH] config: Enable su for all build variants
 
-Remove user-build restriction on WITH_SU. Access control is handled
-by the su binary's per-app whitelist, not the build variant.
+Set WITH_SU=true and remove user-build restriction.
+Access control handled by su binary's per-app whitelist.
 
-Change-Id: I8d85354db6dc25f580ada9f138ec9b6b70de393d
+Change-Id: I9ce62c42ba4d5022ebc2cf6520bcc64fb6375619
 ---
- config/common.mk | 3 +--
- 1 file changed, 1 insertion(+), 2 deletions(-)
+ config/common.mk | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
 
 diff --git a/config/common.mk b/config/common.mk
-index b961788f..89097524 100644
+index b961788f..466aabdf 100644
 --- a/config/common.mk
 +++ b/config/common.mk
-@@ -234,7 +234,7 @@ endif
+@@ -234,14 +234,13 @@ endif
  # Root
  PRODUCT_PACKAGES += \
      adb_root
@@ -24,14 +24,14 @@ index b961788f..89097524 100644
  ifeq ($(WITH_SU),true)
  PRODUCT_PACKAGES += \
      su
-@@ -242,7 +242,6 @@ PRODUCT_PACKAGES += \
+ 
  PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
-     system/xbin/su
- endif
+-    system/xbin/su
 -endif
++    system/bin/su
+ endif
  
  # SystemUI
- PRODUCT_DEXPREOPT_SPEED_APPS += \
 -- 
 2.53.0
 

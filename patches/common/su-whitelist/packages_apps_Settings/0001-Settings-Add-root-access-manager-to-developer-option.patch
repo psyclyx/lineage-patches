@@ -1,4 +1,4 @@
-From 0b4bfe4dbde9bef20e7afaa69ad2c0a3f0db8f36 Mon Sep 17 00:00:00 2001
+From 7c15a5f6d6f9ade674e995ddbe5c366ba7f9272b Mon Sep 17 00:00:00 2001
 From: psyclyx <me@psyclyx.xyz>
 Date: Wed, 1 Apr 2026 05:34:42 -0700
 Subject: [PATCH] Settings: Add root access manager to developer options
@@ -7,22 +7,19 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 Add SuAccessFragment with per-app toggles for root (su) access.
-Manages /data/system/su_whitelist which the su binary checks.
-Only shown when /system/xbin/su exists.
+Writes UIDs to /data/local/su_whitelist (world-readable).
+Alphabetical section headers, show/hide system apps toggle.
 
-Features:
-- Alphabetical section headers (A, B, C...)
-- "Show system" / "Hide system" toggle in overflow menu
-- Pure AOSP — no LineageOS-specific dependencies
+Pure AOSP Settings — no LineageOS-specific dependencies.
 
-Change-Id: I3cf093df9e03f977ed27f58d0d39511514bf0b45
+Change-Id: I416237a8c37b2821bc019b2c231140d8c95b4fc0
 ---
  res/values/strings.xml                        |   5 +
  res/xml/development_settings.xml              |   7 +-
  .../DevelopmentSettingsDashboardFragment.java |   1 +
- .../SuAccessPreferenceController.java         |  33 ++++
+ .../SuAccessPreferenceController.java         |  30 +++
  .../development/su/SuAccessFragment.java      | 175 ++++++++++++++++++
- 5 files changed, 219 insertions(+), 2 deletions(-)
+ 5 files changed, 216 insertions(+), 2 deletions(-)
  create mode 100644 src/com/android/settings/development/SuAccessPreferenceController.java
  create mode 100644 src/com/android/settings/development/su/SuAccessFragment.java
 
@@ -72,10 +69,10 @@ index 0495ee9e5e0..d272d69b4b3 100644
          controllers.add(new LinuxTerminalPreferenceController(context));
 diff --git a/src/com/android/settings/development/SuAccessPreferenceController.java b/src/com/android/settings/development/SuAccessPreferenceController.java
 new file mode 100644
-index 00000000000..650cac37d1b
+index 00000000000..e3a1ef44a00
 --- /dev/null
 +++ b/src/com/android/settings/development/SuAccessPreferenceController.java
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,30 @@
 +/*
 + * SPDX-License-Identifier: Apache-2.0
 + */
@@ -86,8 +83,6 @@ index 00000000000..650cac37d1b
 +
 +import com.android.settings.core.PreferenceControllerMixin;
 +import com.android.settingslib.development.DeveloperOptionsPreferenceController;
-+
-+import java.io.File;
 +
 +public class SuAccessPreferenceController extends DeveloperOptionsPreferenceController
 +        implements PreferenceControllerMixin {
@@ -105,13 +100,12 @@ index 00000000000..650cac37d1b
 +
 +    @Override
 +    public boolean isAvailable() {
-+        // Only show if su binary is installed
-+        return new File("/system/xbin/su").exists();
++        return true;
 +    }
 +}
 diff --git a/src/com/android/settings/development/su/SuAccessFragment.java b/src/com/android/settings/development/su/SuAccessFragment.java
 new file mode 100644
-index 00000000000..e595c222ee0
+index 00000000000..e3f09276cfd
 --- /dev/null
 +++ b/src/com/android/settings/development/su/SuAccessFragment.java
 @@ -0,0 +1,175 @@
@@ -138,11 +132,10 @@ index 00000000000..e595c222ee0
 +
 +import java.io.BufferedReader;
 +import java.io.File;
++import java.io.FileOutputStream;
 +import java.io.FileReader;
-+import java.io.FileWriter;
 +import java.io.IOException;
 +import java.io.PrintWriter;
-+import java.util.ArrayList;
 +import java.util.Collections;
 +import java.util.HashSet;
 +import java.util.List;
@@ -150,7 +143,10 @@ index 00000000000..e595c222ee0
 +
 +public class SuAccessFragment extends SettingsPreferenceFragment {
 +    private static final String TAG = "SuAccessFragment";
-+    private static final String WHITELIST_PATH = "/data/system/su_whitelist";
++    // World-readable file so su binary can read it without root.
++    // su runs in the su SELinux domain but inherits the caller's UID
++    // and seccomp filter, so it can't setuid or query system services.
++    private static final String WHITELIST_PATH = "/data/local/su_whitelist";
 +    private static final String KEY_SHOW_SYSTEM = "show_system";
 +    private static final int MENU_SHOW_SYSTEM = Menu.FIRST;
 +
@@ -199,11 +195,6 @@ index 00000000000..e595c222ee0
 +        return super.onOptionsItemSelected(item);
 +    }
 +
-+    private boolean isSystemApp(ApplicationInfo app) {
-+        return (app.flags & ApplicationInfo.FLAG_SYSTEM) != 0
-+                && (app.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0;
-+    }
-+
 +    private void buildAppList() {
 +        PreferenceScreen screen = getPreferenceManager().createPreferenceScreen(getActivity());
 +        setPreferenceScreen(screen);
@@ -220,13 +211,9 @@ index 00000000000..e595c222ee0
 +        PreferenceCategory currentCategory = null;
 +
 +        for (ApplicationInfo app : apps) {
-+            boolean system = isSystemApp(app);
++            boolean hasLauncher = mPm.getLaunchIntentForPackage(app.packageName) != null;
++            if (!hasLauncher && !mShowSystem) continue;
 +
-+            // Filter: always show apps with launcher icon; system apps only if toggled
-+            if (system && !mShowSystem) continue;
-+            if (!system && mPm.getLaunchIntentForPackage(app.packageName) == null) continue;
-+
-+            // Section headers by first letter
 +            String label = mPm.getApplicationLabel(app).toString();
 +            char section = Character.toUpperCase(label.charAt(0));
 +            if (!Character.isLetter(section)) section = '#';
@@ -281,10 +268,17 @@ index 00000000000..e595c222ee0
 +    }
 +
 +    private void writeWhitelist(Set<Integer> uids) {
-+        try (PrintWriter writer = new PrintWriter(new FileWriter(WHITELIST_PATH))) {
-+            for (int uid : uids) {
-+                writer.println(uid);
++        try {
++            File f = new File(WHITELIST_PATH);
++            try (PrintWriter writer = new PrintWriter(new FileOutputStream(f))) {
++                for (int uid : uids) {
++                    writer.println(uid);
++                }
 +            }
++            // World-readable so su binary can check it from any UID
++            f.setReadable(true, false);
++            f.setWritable(false, false);
++            f.setWritable(true, true);
 +        } catch (IOException e) {
 +            Log.e(TAG, "Failed to write whitelist", e);
 +        }

@@ -1,0 +1,188 @@
+From 6af81c6124e5c07ca6c3e07451b39cafd727dd69 Mon Sep 17 00:00:00 2001
+From: psyclyx <me@psyclyx.xyz>
+Date: Wed, 1 Apr 2026 04:49:58 -0700
+Subject: [PATCH] sepolicy: Enable su for all build variants
+
+- Move su domain setup out of userdebug_or_eng() wrapper
+- Add domain transitions for all untrusted_app variants
+- Allow su to read whitelist from /data/local (shell_data_file)
+- Allow su to re-exec itself
+- Update neverallow rules to permit app->su transitions
+- Add /system/bin/su file_contexts entry
+
+Change-Id: I874b32b1869aa3212010a0f06a6c8e15763330b1
+---
+ contexts/file_contexts_test_data |  1 +
+ private/domain.te                | 20 +++++++--------
+ private/file_contexts            |  1 +
+ private/su.te                    | 43 ++++++++++++++++++++------------
+ 4 files changed, 39 insertions(+), 26 deletions(-)
+
+diff --git a/contexts/file_contexts_test_data b/contexts/file_contexts_test_data
+index 59745708d..f1a0a8708 100644
+--- a/contexts/file_contexts_test_data
++++ b/contexts/file_contexts_test_data
+@@ -392,6 +392,7 @@
+ /system/bin/dhcpcd-6.8.2                                          dhcp_exec
+ /system/bin/dmesgd                                                dmesgd_exec
+ /system/xbin/su                                                   su_exec
++/system/bin/su                                                    su_exec
+ /system/bin/dnsmasq                                               dnsmasq_exec
+ /system/bin/linker                                                system_linker_exec
+ /system/bin/linker64                                              system_linker_exec
+diff --git a/private/domain.te b/private/domain.te
+index bdc185c73..690542452 100644
+--- a/private/domain.te
++++ b/private/domain.te
+@@ -395,7 +395,7 @@ get_prop(domain, device_config_media_native_prop)
+ # This occurs when the process crashes.
+ # We do not apply this to the su domain to avoid interfering with
+ # tests (b/114136122)
+-domain_auto_trans({ domain userdebug_or_eng(`-su') }, crash_dump_exec, crash_dump);
++domain_auto_trans({ domain -su }, crash_dump_exec, crash_dump);
+ allow domain crash_dump:process sigchld;
+ 
+ # Allow every process to check the heapprofd.enable properties to determine
+@@ -968,7 +968,7 @@ full_treble_only(`
+   neverallow {
+     coredomain
+     -shell
+-    userdebug_or_eng(`-su')
++    -su
+     -ueventd # uevent is granted create for this device, but we still neverallow I/O below
+   } vndbinder_device:chr_file rw_file_perms;
+ ')
+@@ -979,14 +979,14 @@ full_treble_only(`
+   neverallow {
+     coredomain
+     -shell
+-    userdebug_or_eng(`-su')
++    -su
+   } vndservice_manager_type:service_manager *;
+ ')
+ full_treble_only(`
+   neverallow {
+     coredomain
+     -shell
+-    userdebug_or_eng(`-su')
++    -su
+   } vndservicemanager:binder *;
+ ')
+ 
+@@ -1367,9 +1367,9 @@ neverallow {
+ } { file_type fs_type dev_type }:{ lnk_file fifo_file sock_file } mounton;
+ 
+ # Nobody should be able to execute su on user builds.
+-# On userdebug/eng builds, only dumpstate, shell, and
+-# su itself execute su.
+-neverallow { domain userdebug_or_eng(`-dumpstate -shell -su -overlay_remounter') } su_exec:file no_x_file_perms;
++# On userdebug/eng builds, only dumpstate, shell, su, and
++# whitelisted app domains execute su.
++neverallow { domain -dumpstate -shell -su -overlay_remounter -untrusted_app -untrusted_app_25 -untrusted_app_27 -untrusted_app_29 -untrusted_app_30 -untrusted_app_32 } su_exec:file no_x_file_perms;
+ 
+ # Do not allow the introduction of new execmod rules. Text relocations
+ # and modification of executable pages are unsafe.
+@@ -1463,7 +1463,7 @@ neverallow {
+   -webview_zygote
+   -zygote
+ } {
+-  appdomain -shell -simpleperf userdebug_or_eng(`-su') -tradeinmode -isolated_app
++  appdomain -shell -simpleperf -su -tradeinmode -isolated_app
+ }:process { transition dyntransition };
+ 
+ # Only domains spawned from zygote, runas, simpleperf_app_runner, and zygote_next may have
+@@ -1915,7 +1915,7 @@ neverallow {
+     -appdomain
+     with_asan(`-asan_extract')
+     -shell
+-    userdebug_or_eng(`-su')
++    -su
+     -system_server_startup # for memfd backed executable regions
+     -app_zygote
+     -webview_zygote
+@@ -2143,7 +2143,7 @@ full_treble_only(`
+     -netd # netdomain needs this
+     -mdnsd # netdomain needs this
+     -prng_seeder # Any process using libcrypto needs this
+-    userdebug_or_eng(`-su') # communications with su are permitted only on userdebug or eng builds
++    -su # communications with su are permitted only on userdebug or eng builds
+     -init
+     -tombstoned # linker to tombstoned
+     -heapprofd
+diff --git a/private/file_contexts b/private/file_contexts
+index bc79eebf7..37c74cb2f 100644
+--- a/private/file_contexts
++++ b/private/file_contexts
+@@ -322,6 +322,7 @@
+ /system/bin/dhcpcd-6\.8\.2	u:object_r:dhcp_exec:s0
+ /system/bin/dmesgd	u:object_r:dmesgd_exec:s0
+ /system/xbin/su		u:object_r:su_exec:s0
++/system/bin/su		u:object_r:su_exec:s0
+ /system/bin/dnsmasq     u:object_r:dnsmasq_exec:s0
+ /system/bin/linker(64)? u:object_r:system_linker_exec:s0
+ /system/bin/linkerconfig u:object_r:linkerconfig_exec:s0
+diff --git a/private/su.te b/private/su.te
+index fae9b987e..122e39ffa 100644
+--- a/private/su.te
++++ b/private/su.te
+@@ -1,7 +1,31 @@
+-userdebug_or_eng(`
+-  typeattribute su coredomain;
++# Whitelisted su: allow all builds to use su (access control in userspace)
++typeattribute su coredomain;
++
++domain_auto_trans(shell, su_exec, su)
++
++# Allow apps to execute su (whitelist enforced by su binary itself)
++domain_auto_trans(untrusted_app, su_exec, su)
++domain_auto_trans(untrusted_app_25, su_exec, su)
++domain_auto_trans(untrusted_app_27, su_exec, su)
++domain_auto_trans(untrusted_app_29, su_exec, su)
++domain_auto_trans(untrusted_app_30, su_exec, su)
++domain_auto_trans(untrusted_app_32, su_exec, su)
++
++# Allow su to read its whitelist from /data/local/
++allow su shell_data_file:file { read open getattr };
++
++# Allow su to re-exec itself (to escape app seccomp filter)
++allow su su_exec:file { read open getattr execute execute_no_trans };
++
++# su is permissive — access control is in the su binary, not SELinux
++permissive su;
++
++app_domain(su)
++typeattribute su mlstrustedsubject;
++net_domain(su)
++vndbinder_use(su)
+ 
+-  domain_auto_trans(shell, su_exec, su)
++userdebug_or_eng(`
+   # Allow dumpstate to call su on userdebug / eng builds to collect
+   # additional information.
+   domain_auto_trans(dumpstate, su_exec, su)
+@@ -23,22 +47,9 @@ userdebug_or_eng(`
+   # own domain.
+   virtualizationservice_use(su)
+ 
+-  # su is also permissive to permit setenforce.
+-  permissive su;
+-
+-  app_domain(su)
+-
+   # Do not audit accesses to keystore2 namespace for the su domain.
+   dontaudit su keystore2_key_type:{ keystore2 keystore2_key } *;
+ 
+-  typeattribute su mlstrustedsubject;
+-
+-  # Add su to various domains
+-  net_domain(su)
+-
+-  # grant su access to vndbinder
+-  vndbinder_use(su)
+-
+   dontaudit su self:capability_class_set *;
+   dontaudit su self:capability2 *;
+   dontaudit su kernel:security *;
+-- 
+2.53.0
+
