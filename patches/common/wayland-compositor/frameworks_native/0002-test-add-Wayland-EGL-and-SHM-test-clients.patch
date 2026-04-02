@@ -1,0 +1,1279 @@
+From cf0ed7629cf9694d475c7cac10620064ab9a2903 Mon Sep 17 00:00:00 2001
+From: psyclyx <me@psyclyx.xyz>
+Date: Wed, 1 Apr 2026 20:44:13 -0700
+Subject: [PATCH 2/2] test: add Wayland EGL and SHM test clients
+
+Add test clients for validating the Wayland compositor:
+
+- wayland_egl_test: EGL/dmabuf rendering path test client
+- wayland_shm_test: shared memory rendering path test client
+- run_integration_test.sh: automated integration test script
+
+These test clients connect to the SF Wayland compositor socket,
+create surfaces, and render test patterns to validate the full
+buffer import and composition pipeline.
+
+Change-Id: I8722d47f390975066f426b6339cb7b0dff9332c8
+---
+ .../tests/wayland_test_client/Android.bp      |  59 ++
+ .../run_integration_test.sh                   | 260 ++++++++
+ .../wayland_test_client/wayland_egl_test.cpp  | 574 ++++++++++++++++++
+ .../wayland_test_client/wayland_shm_test.cpp  | 332 ++++++++++
+ 4 files changed, 1225 insertions(+)
+ create mode 100644 services/surfaceflinger/tests/wayland_test_client/Android.bp
+ create mode 100755 services/surfaceflinger/tests/wayland_test_client/run_integration_test.sh
+ create mode 100644 services/surfaceflinger/tests/wayland_test_client/wayland_egl_test.cpp
+ create mode 100644 services/surfaceflinger/tests/wayland_test_client/wayland_shm_test.cpp
+
+diff --git a/services/surfaceflinger/tests/wayland_test_client/Android.bp b/services/surfaceflinger/tests/wayland_test_client/Android.bp
+new file mode 100644
+index 0000000000..ab2b2ff61c
+--- /dev/null
++++ b/services/surfaceflinger/tests/wayland_test_client/Android.bp
+@@ -0,0 +1,59 @@
++package {
++    default_applicable_licenses: ["frameworks_native_license"],
++}
++
++cc_binary {
++    name: "wayland_egl_test",
++    srcs: ["wayland_egl_test.cpp"],
++
++    static_libs: [
++        "libwayland_client_static",
++        "libwayland_extension_client_protocols",
++        "libffi",
++    ],
++
++    shared_libs: [
++        "libEGL",
++        "libGLESv2",
++        "libgui",
++        "libui",
++        "libutils",
++        "libnativewindow",
++        "liblog",
++    ],
++
++    header_libs: [
++        "libui_headers",
++        "libnativewindow_headers",
++        "libdrm_headers",
++    ],
++
++    cflags: [
++        "-Wall",
++        "-Wextra",
++        "-Werror",
++        "-Wno-unused-parameter",
++    ],
++}
++
++cc_binary {
++    name: "wayland_shm_test",
++    srcs: ["wayland_shm_test.cpp"],
++
++    static_libs: [
++        "libwayland_client_static",
++        "libwayland_extension_client_protocols",
++        "libffi",
++    ],
++
++    shared_libs: [
++        "liblog",
++    ],
++
++    cflags: [
++        "-Wall",
++        "-Wextra",
++        "-Werror",
++        "-Wno-unused-parameter",
++    ],
++}
+diff --git a/services/surfaceflinger/tests/wayland_test_client/run_integration_test.sh b/services/surfaceflinger/tests/wayland_test_client/run_integration_test.sh
+new file mode 100755
+index 0000000000..7840fcc9c0
+--- /dev/null
++++ b/services/surfaceflinger/tests/wayland_test_client/run_integration_test.sh
+@@ -0,0 +1,260 @@
++#!/bin/bash
++# Integration test for the SurfaceFlinger Wayland compositor.
++#
++# Usage:
++#   ./run_integration_test.sh [--build-only] [--skip-build]
++#
++# Prerequisites:
++#   - ANDROID_BUILD_TOP set and lunch target configured
++#   - For runtime tests: Cuttlefish instance running, adb connected
++#
++# Exit codes:
++#   0 = all tests passed
++#   1 = build failure
++#   2 = runtime failure
++
++set -euo pipefail
++
++RED='\033[0;31m'
++GREEN='\033[0;32m'
++YELLOW='\033[0;33m'
++NC='\033[0m'
++
++SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
++SF_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
++
++BUILD_ONLY=false
++SKIP_BUILD=false
++MAX_FRAMES=60
++
++for arg in "$@"; do
++    case "$arg" in
++        --build-only) BUILD_ONLY=true ;;
++        --skip-build) SKIP_BUILD=true ;;
++        --frames=*) MAX_FRAMES="${arg#--frames=}" ;;
++        *) echo "Unknown argument: $arg"; exit 1 ;;
++    esac
++done
++
++pass() { echo -e "${GREEN}PASS${NC}: $1"; }
++fail() { echo -e "${RED}FAIL${NC}: $1"; exit "$2"; }
++info() { echo -e "${YELLOW}INFO${NC}: $1"; }
++
++# ---------- Build verification ----------
++
++build_test() {
++    info "Building surfaceflinger (with Wayland compositor)..."
++    if ! (cd "$SF_DIR" && mma -j"$(nproc)" 2>&1 | tail -20); then
++        fail "surfaceflinger build failed" 1
++    fi
++    pass "surfaceflinger build"
++
++    info "Building wayland_egl_test and wayland_shm_test..."
++    if ! (cd "$SCRIPT_DIR" && mma -j"$(nproc)" 2>&1 | tail -20); then
++        fail "test client build failed" 1
++    fi
++    pass "wayland_egl_test build"
++    pass "wayland_shm_test build"
++}
++
++# ---------- Static checks ----------
++
++static_checks() {
++    info "Checking Wayland module files exist..."
++    local modules=(
++        WaylandCompositor
++        WaylandDmabuf
++        WaylandSurface
++        WaylandXdgShell
++        WaylandOutput
++        WaylandSeat
++        WaylandShm
++    )
++    for mod in "${modules[@]}"; do
++        if [[ ! -f "$SF_DIR/Wayland/${mod}.h" ]] || [[ ! -f "$SF_DIR/Wayland/${mod}.cpp" ]]; then
++            fail "Missing Wayland/${mod}.{h,cpp}" 1
++        fi
++    done
++    pass "All Wayland module files present"
++
++    info "Checking Android.bp references Wayland sources..."
++    if ! grep -q "Wayland/WaylandCompositor.cpp" "$SF_DIR/Android.bp"; then
++        fail "Android.bp does not reference WaylandCompositor.cpp" 1
++    fi
++    pass "Android.bp references Wayland sources"
++
++    info "Checking test client Android.bp..."
++    if ! grep -q "wayland_egl_test" "$SCRIPT_DIR/Android.bp"; then
++        fail "Test client Android.bp missing wayland_egl_test target" 1
++    fi
++    if ! grep -q "wayland_shm_test" "$SCRIPT_DIR/Android.bp"; then
++        fail "Test client Android.bp missing wayland_shm_test target" 1
++    fi
++    pass "Test client build targets exist"
++}
++
++# ---------- Runtime test ----------
++
++runtime_test() {
++    info "Checking adb connectivity..."
++    if ! adb devices 2>/dev/null | grep -q "device$"; then
++        fail "No adb device connected. Start a Cuttlefish instance first." 2
++    fi
++    pass "adb device connected"
++
++    info "Checking Wayland socket..."
++    local socket_path="/data/wayland/wayland-0"
++    if ! adb shell "test -S $socket_path" 2>/dev/null; then
++        info "Wayland socket not found at $socket_path"
++        info "Attempting to verify SurfaceFlinger has Wayland support..."
++        if adb shell "ls /data/wayland/" 2>/dev/null; then
++            fail "Socket directory exists but socket missing. SF may have failed to create it." 2
++        else
++            info "Creating /data/wayland directory..."
++            adb shell "mkdir -p /data/wayland && chmod 0700 /data/wayland"
++            info "Wayland directory created. SF must be restarted to create socket."
++            info "Run: adb shell stop && adb shell start"
++            fail "Wayland socket not yet created. Restart SF and re-run." 2
++        fi
++    fi
++    pass "Wayland socket exists"
++
++    info "Pushing wayland_egl_test to device..."
++    local test_bin
++    test_bin="$(find "$ANDROID_PRODUCT_OUT" -name wayland_egl_test -type f 2>/dev/null | head -1)"
++    if [[ -z "$test_bin" ]]; then
++        fail "wayland_egl_test binary not found in \$ANDROID_PRODUCT_OUT. Build first." 2
++    fi
++    adb push "$test_bin" /data/local/tmp/wayland_egl_test
++    adb shell "chmod 755 /data/local/tmp/wayland_egl_test"
++    pass "Test binary pushed"
++
++    info "Running wayland_egl_test ($MAX_FRAMES frames)..."
++    local output
++    local exit_code=0
++    output=$(adb shell "XDG_RUNTIME_DIR=/data/wayland WAYLAND_DISPLAY=wayland-0 \
++        /data/local/tmp/wayland_egl_test $MAX_FRAMES" 2>&1) || exit_code=$?
++
++    echo "$output"
++
++    if [[ $exit_code -ne 0 ]]; then
++        fail "wayland_egl_test exited with code $exit_code" 2
++    fi
++
++    # Validate output
++    if ! echo "$output" | grep -q "Connected to Wayland display"; then
++        fail "Test did not connect to Wayland display" 2
++    fi
++    pass "Connected to Wayland display"
++
++    if ! echo "$output" | grep -q "EGL.*initialized"; then
++        fail "EGL initialization failed" 2
++    fi
++    pass "EGL initialized"
++
++    if ! echo "$output" | grep -q "GL_RENDERER"; then
++        fail "GL context not created" 2
++    fi
++    pass "GL context created"
++
++    if ! echo "$output" | grep -q "Done\. Rendered"; then
++        fail "Render loop did not complete" 2
++    fi
++
++    local rendered
++    rendered=$(echo "$output" | grep -oP 'Rendered \K[0-9]+')
++    if [[ -n "$rendered" ]] && [[ "$rendered" -ge "$MAX_FRAMES" ]]; then
++        pass "Rendered $rendered frames"
++    else
++        fail "Expected $MAX_FRAMES frames, got ${rendered:-0}" 2
++    fi
++
++    # Optional: screenshot check
++    info "Taking screenshot for visual verification..."
++    local screenshot="/tmp/wayland_test_screenshot.png"
++    if adb shell screencap -p > "$screenshot" 2>/dev/null; then
++        local size
++        size=$(wc -c < "$screenshot")
++        if [[ "$size" -gt 1000 ]]; then
++            pass "Screenshot captured ($size bytes) — manual visual check: $screenshot"
++        else
++            info "Screenshot too small ($size bytes), may be empty"
++        fi
++    else
++        info "screencap not available, skipping visual check"
++    fi
++
++    # --- SHM test ---
++    info "Pushing wayland_shm_test to device..."
++    local shm_bin
++    shm_bin="$(find "$ANDROID_PRODUCT_OUT" -name wayland_shm_test -type f 2>/dev/null | head -1)"
++    if [[ -z "$shm_bin" ]]; then
++        fail "wayland_shm_test binary not found in \$ANDROID_PRODUCT_OUT. Build first." 2
++    fi
++    adb push "$shm_bin" /data/local/tmp/wayland_shm_test
++    adb shell "chmod 755 /data/local/tmp/wayland_shm_test"
++    pass "SHM test binary pushed"
++
++    info "Running wayland_shm_test ($MAX_FRAMES frames)..."
++    local shm_output
++    local shm_exit=0
++    shm_output=$(adb shell "XDG_RUNTIME_DIR=/data/wayland WAYLAND_DISPLAY=wayland-0 \
++        /data/local/tmp/wayland_shm_test $MAX_FRAMES" 2>&1) || shm_exit=$?
++
++    echo "$shm_output"
++
++    if [[ $shm_exit -ne 0 ]]; then
++        fail "wayland_shm_test exited with code $shm_exit" 2
++    fi
++
++    if ! echo "$shm_output" | grep -q "Connected to Wayland display"; then
++        fail "SHM test did not connect to Wayland display" 2
++    fi
++    pass "SHM: Connected to Wayland display"
++
++    if ! echo "$shm_output" | grep -q "SHM pool created"; then
++        fail "SHM pool creation failed" 2
++    fi
++    pass "SHM: Pool created"
++
++    if ! echo "$shm_output" | grep -q "Done\. Rendered"; then
++        fail "SHM render loop did not complete" 2
++    fi
++
++    local shm_rendered
++    shm_rendered=$(echo "$shm_output" | grep -oP 'Rendered \K[0-9]+')
++    if [[ -n "$shm_rendered" ]] && [[ "$shm_rendered" -ge "$MAX_FRAMES" ]]; then
++        pass "SHM: Rendered $shm_rendered frames"
++    else
++        fail "SHM: Expected $MAX_FRAMES frames, got ${shm_rendered:-0}" 2
++    fi
++}
++
++# ---------- Main ----------
++
++echo "===== Wayland Compositor Integration Test ====="
++echo ""
++
++static_checks
++
++if [[ "$SKIP_BUILD" != true ]]; then
++    if [[ -z "${ANDROID_BUILD_TOP:-}" ]]; then
++        fail "ANDROID_BUILD_TOP not set. Run 'source build/envsetup.sh && lunch <target>' first." 1
++    fi
++    build_test
++else
++    info "Skipping build (--skip-build)"
++fi
++
++if [[ "$BUILD_ONLY" == true ]]; then
++    info "Skipping runtime tests (--build-only)"
++    echo ""
++    echo -e "${GREEN}Build verification complete.${NC}"
++    exit 0
++fi
++
++runtime_test
++
++echo ""
++echo -e "${GREEN}===== All integration tests passed =====${NC}"
++exit 0
+diff --git a/services/surfaceflinger/tests/wayland_test_client/wayland_egl_test.cpp b/services/surfaceflinger/tests/wayland_test_client/wayland_egl_test.cpp
+new file mode 100644
+index 0000000000..91f2d77f40
+--- /dev/null
++++ b/services/surfaceflinger/tests/wayland_test_client/wayland_egl_test.cpp
+@@ -0,0 +1,574 @@
++/*
++ * Copyright (C) 2025 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++// Wayland EGL test client for the SurfaceFlinger Wayland compositor.
++//
++// Uses Android-native EGL (EGL_DEFAULT_DISPLAY) to render a spinning triangle
++// via GLES2, then exports the rendered GraphicBuffer as a dmabuf and submits
++// it to the Wayland compositor via zwp_linux_dmabuf_v1.
++//
++// This works because Android's EGL only supports EGL_PLATFORM_ANDROID_KHR,
++// not EGL_PLATFORM_WAYLAND_KHR. Instead of wl_egl_window, we render to
++// EGLImage-backed FBOs created from GraphicBuffers, then export the dmabuf
++// fd from the buffer's native handle.
++
++#include <wayland-client.h>
++#include <xdg-shell-client-protocol.h>
++#include <linux-dmabuf-unstable-v1-client-protocol.h>
++
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#include <GLES2/gl2.h>
++#include <GLES2/gl2ext.h>
++
++#include <ui/GraphicBuffer.h>
++#include <cutils/native_handle.h>
++#include <drm_fourcc.h>
++
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++using namespace android;
++
++static const int WIDTH = 512;
++static const int HEIGHT = 512;
++static const int NUM_BUFFERS = 2;
++
++// --- Wayland globals ---
++
++static struct wl_display* wl_dpy;
++static struct wl_compositor* wl_comp;
++static struct xdg_wm_base* wm_base;
++static struct zwp_linux_dmabuf_v1* dmabuf_iface;
++static struct wl_surface* wl_surf;
++static struct xdg_surface* xdg_surf;
++static struct xdg_toplevel* toplevel;
++static bool configured = false;
++static bool running = true;
++
++// --- Per-buffer state ---
++
++struct RenderBuffer {
++    sp<GraphicBuffer> gb;
++    EGLImageKHR image = EGL_NO_IMAGE_KHR;
++    GLuint fbo = 0;
++    GLuint rbo = 0;
++    struct wl_buffer* wl_buf = nullptr;
++    bool busy = false; // owned by compositor
++    int dmabuf_fd = -1;
++};
++
++static RenderBuffer buffers[NUM_BUFFERS];
++static int current_buf = 0;
++
++// --- EGL state ---
++
++static EGLDisplay egl_display;
++static EGLContext egl_context;
++
++// --- GL program ---
++
++static GLuint program;
++static GLint loc_pos, loc_color, loc_angle;
++
++// --- xdg_wm_base listener ---
++
++static void wm_base_ping(void*, struct xdg_wm_base* base, uint32_t serial) {
++    xdg_wm_base_pong(base, serial);
++}
++
++static const struct xdg_wm_base_listener wm_base_listener = {
++    .ping = wm_base_ping,
++};
++
++// --- xdg_surface listener ---
++
++static void xdg_surface_configure(void*, struct xdg_surface* surf, uint32_t serial) {
++    xdg_surface_ack_configure(surf, serial);
++    configured = true;
++}
++
++static const struct xdg_surface_listener xdg_surface_listener_impl = {
++    .configure = xdg_surface_configure,
++};
++
++// --- xdg_toplevel listener ---
++
++static void toplevel_configure(void*, struct xdg_toplevel*, int32_t, int32_t,
++                               struct wl_array*) {}
++
++static void toplevel_close(void*, struct xdg_toplevel*) {
++    running = false;
++}
++
++static const struct xdg_toplevel_listener toplevel_listener = {
++    .configure = toplevel_configure,
++    .close = toplevel_close,
++};
++
++// --- wl_buffer listener ---
++
++static void buffer_release(void* data, struct wl_buffer* /*buf*/) {
++    auto* rb = static_cast<RenderBuffer*>(data);
++    rb->busy = false;
++}
++
++static const struct wl_buffer_listener buffer_listener = {
++    .release = buffer_release,
++};
++
++// --- Registry listener ---
++
++static void registry_global(void*, struct wl_registry* registry,
++                            uint32_t name, const char* interface, uint32_t version) {
++    if (strcmp(interface, wl_compositor_interface.name) == 0) {
++        wl_comp = static_cast<struct wl_compositor*>(
++            wl_registry_bind(registry, name, &wl_compositor_interface,
++                             version < 4 ? version : 4));
++    } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
++        wm_base = static_cast<struct xdg_wm_base*>(
++            wl_registry_bind(registry, name, &xdg_wm_base_interface, 1));
++        xdg_wm_base_add_listener(wm_base, &wm_base_listener, nullptr);
++    } else if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
++        dmabuf_iface = static_cast<struct zwp_linux_dmabuf_v1*>(
++            wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface,
++                             version < 3 ? version : 3));
++    }
++}
++
++static void registry_global_remove(void*, struct wl_registry*, uint32_t) {}
++
++static const struct wl_registry_listener registry_listener = {
++    .global = registry_global,
++    .global_remove = registry_global_remove,
++};
++
++// --- EGL/GL setup ---
++
++static PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC glEGLImageTargetRenderbufferStorageOES_fn;
++
++static bool init_egl() {
++    egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
++    if (egl_display == EGL_NO_DISPLAY) {
++        fprintf(stderr, "eglGetDisplay(EGL_DEFAULT_DISPLAY) failed\n");
++        return false;
++    }
++
++    EGLint major, minor;
++    if (!eglInitialize(egl_display, &major, &minor)) {
++        fprintf(stderr, "eglInitialize failed: 0x%x\n", eglGetError());
++        return false;
++    }
++    printf("EGL %d.%d initialized\n", major, minor);
++
++    eglBindAPI(EGL_OPENGL_ES_API);
++
++    // We don't need a window surface — we render to FBOs backed by EGLImages.
++    // Create a surfaceless context or a 1x1 pbuffer.
++    EGLint config_attribs[] = {
++        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
++        EGL_RED_SIZE, 8,
++        EGL_GREEN_SIZE, 8,
++        EGL_BLUE_SIZE, 8,
++        EGL_ALPHA_SIZE, 8,
++        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
++        EGL_NONE,
++    };
++
++    EGLConfig config;
++    EGLint num_configs;
++    if (!eglChooseConfig(egl_display, config_attribs, &config, 1, &num_configs) ||
++        num_configs == 0) {
++        fprintf(stderr, "eglChooseConfig failed\n");
++        return false;
++    }
++
++    EGLint context_attribs[] = {
++        EGL_CONTEXT_CLIENT_VERSION, 2,
++        EGL_NONE,
++    };
++    egl_context = eglCreateContext(egl_display, config, EGL_NO_CONTEXT, context_attribs);
++    if (egl_context == EGL_NO_CONTEXT) {
++        fprintf(stderr, "eglCreateContext failed: 0x%x\n", eglGetError());
++        return false;
++    }
++
++    // Create a tiny pbuffer to make current (we render to FBOs, not this surface).
++    EGLint pbuf_attribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
++    EGLSurface pbuf = eglCreatePbufferSurface(egl_display, config, pbuf_attribs);
++    if (pbuf == EGL_NO_SURFACE) {
++        fprintf(stderr, "eglCreatePbufferSurface failed: 0x%x\n", eglGetError());
++        return false;
++    }
++
++    if (!eglMakeCurrent(egl_display, pbuf, pbuf, egl_context)) {
++        fprintf(stderr, "eglMakeCurrent failed: 0x%x\n", eglGetError());
++        return false;
++    }
++
++    printf("GL_RENDERER: %s\n", glGetString(GL_RENDERER));
++    printf("GL_VERSION:  %s\n", glGetString(GL_VERSION));
++
++    glEGLImageTargetRenderbufferStorageOES_fn =
++        reinterpret_cast<PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC>(
++            eglGetProcAddress("glEGLImageTargetRenderbufferStorageOES"));
++    if (!glEGLImageTargetRenderbufferStorageOES_fn) {
++        fprintf(stderr, "glEGLImageTargetRenderbufferStorageOES not available\n");
++        return false;
++    }
++
++    return true;
++}
++
++static GLuint compile_shader(GLenum type, const char* src) {
++    GLuint shader = glCreateShader(type);
++    glShaderSource(shader, 1, &src, nullptr);
++    glCompileShader(shader);
++    GLint ok;
++    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
++    if (!ok) {
++        char log[512];
++        glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
++        fprintf(stderr, "Shader compile error: %s\n", log);
++    }
++    return shader;
++}
++
++static bool init_gl() {
++    const char* vs =
++        "attribute vec2 pos;\n"
++        "attribute vec3 color;\n"
++        "varying vec3 v_color;\n"
++        "uniform float angle;\n"
++        "void main() {\n"
++        "  float c = cos(angle);\n"
++        "  float s = sin(angle);\n"
++        "  mat2 rot = mat2(c, s, -s, c);\n"
++        "  gl_Position = vec4(rot * pos, 0.0, 1.0);\n"
++        "  v_color = color;\n"
++        "}\n";
++
++    const char* fs =
++        "precision mediump float;\n"
++        "varying vec3 v_color;\n"
++        "void main() {\n"
++        "  gl_FragColor = vec4(v_color, 1.0);\n"
++        "}\n";
++
++    GLuint vsh = compile_shader(GL_VERTEX_SHADER, vs);
++    GLuint fsh = compile_shader(GL_FRAGMENT_SHADER, fs);
++    program = glCreateProgram();
++    glAttachShader(program, vsh);
++    glAttachShader(program, fsh);
++    glLinkProgram(program);
++
++    GLint ok;
++    glGetProgramiv(program, GL_LINK_STATUS, &ok);
++    if (!ok) {
++        char log[512];
++        glGetProgramInfoLog(program, sizeof(log), nullptr, log);
++        fprintf(stderr, "Program link error: %s\n", log);
++        return false;
++    }
++
++    loc_pos = glGetAttribLocation(program, "pos");
++    loc_color = glGetAttribLocation(program, "color");
++    loc_angle = glGetUniformLocation(program, "angle");
++    return true;
++}
++
++// --- Buffer allocation ---
++
++static int get_dmabuf_fd(const sp<GraphicBuffer>& gb) {
++    const native_handle_t* handle = gb->getNativeBuffer()->handle;
++    if (!handle || handle->numFds < 1) {
++        return -1;
++    }
++    // The first fd in the native handle is the dmabuf fd for single-plane formats.
++    return handle->data[0];
++}
++
++static bool init_buffers() {
++    auto eglCreateImageKHR_fn = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(
++        eglGetProcAddress("eglCreateImageKHR"));
++    if (!eglCreateImageKHR_fn) {
++        fprintf(stderr, "eglCreateImageKHR not available\n");
++        return false;
++    }
++
++    for (int i = 0; i < NUM_BUFFERS; i++) {
++        RenderBuffer& rb = buffers[i];
++
++        // Allocate a GPU-renderable GraphicBuffer.
++        // Use ABGR8888 (DRM_FORMAT_ABGR8888) which maps to Android RGBA_8888.
++        rb.gb = sp<GraphicBuffer>::make(
++            WIDTH, HEIGHT, PIXEL_FORMAT_RGBA_8888, 1u,
++            static_cast<uint64_t>(
++                GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE |
++                GRALLOC_USAGE_HW_COMPOSER),
++            "WaylandEglTest");
++
++        if (rb.gb->initCheck() != NO_ERROR) {
++            fprintf(stderr, "GraphicBuffer alloc failed for buffer %d\n", i);
++            return false;
++        }
++
++        // Get dmabuf fd for Wayland submission.
++        rb.dmabuf_fd = get_dmabuf_fd(rb.gb);
++        if (rb.dmabuf_fd < 0) {
++            fprintf(stderr, "Failed to get dmabuf fd for buffer %d\n", i);
++            return false;
++        }
++        printf("Buffer %d: %dx%d stride=%d dmabuf_fd=%d\n",
++               i, WIDTH, HEIGHT, rb.gb->getStride(), rb.dmabuf_fd);
++
++        // Create EGLImage from GraphicBuffer.
++        EGLClientBuffer clientBuf = reinterpret_cast<EGLClientBuffer>(rb.gb->getNativeBuffer());
++        EGLint img_attrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
++        rb.image = eglCreateImageKHR_fn(egl_display, EGL_NO_CONTEXT,
++                                         EGL_NATIVE_BUFFER_ANDROID, clientBuf, img_attrs);
++        if (rb.image == EGL_NO_IMAGE_KHR) {
++            fprintf(stderr, "eglCreateImageKHR failed for buffer %d: 0x%x\n",
++                    i, eglGetError());
++            return false;
++        }
++
++        // Create FBO + renderbuffer backed by the EGLImage.
++        glGenRenderbuffers(1, &rb.rbo);
++        glBindRenderbuffer(GL_RENDERBUFFER, rb.rbo);
++        glEGLImageTargetRenderbufferStorageOES_fn(GL_RENDERBUFFER, rb.image);
++
++        glGenFramebuffers(1, &rb.fbo);
++        glBindFramebuffer(GL_FRAMEBUFFER, rb.fbo);
++        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                                  GL_RENDERBUFFER, rb.rbo);
++
++        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
++        if (status != GL_FRAMEBUFFER_COMPLETE) {
++            fprintf(stderr, "FBO incomplete for buffer %d: 0x%x\n", i, status);
++            return false;
++        }
++
++        // Create wl_buffer from dmabuf.
++        struct zwp_linux_buffer_params_v1* params =
++            zwp_linux_dmabuf_v1_create_params(dmabuf_iface);
++
++        uint32_t stride = rb.gb->getStride() * 4; // bytes per row (RGBA = 4 bpp)
++        // DRM_FORMAT_ABGR8888 = Android RGBA_8888
++        zwp_linux_buffer_params_v1_add(params, rb.dmabuf_fd, 0, 0, stride, 0, 0);
++        rb.wl_buf = zwp_linux_buffer_params_v1_create_immed(
++            params, WIDTH, HEIGHT, DRM_FORMAT_ABGR8888, 0);
++        zwp_linux_buffer_params_v1_destroy(params);
++
++        if (!rb.wl_buf) {
++            fprintf(stderr, "Failed to create wl_buffer for buffer %d\n", i);
++            return false;
++        }
++
++        wl_buffer_add_listener(rb.wl_buf, &buffer_listener, &rb);
++        printf("Buffer %d: wl_buffer created, FBO ready\n", i);
++    }
++
++    glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    return true;
++}
++
++// --- Rendering ---
++
++static void draw_frame(int buf_idx, float angle) {
++    RenderBuffer& rb = buffers[buf_idx];
++    glBindFramebuffer(GL_FRAMEBUFFER, rb.fbo);
++    glViewport(0, 0, WIDTH, HEIGHT);
++    glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
++    glClear(GL_COLOR_BUFFER_BIT);
++    glUseProgram(program);
++
++    const float verts[] = {
++         0.0f,  0.6f,  1.0f, 0.0f, 0.0f,
++        -0.5f, -0.4f,  0.0f, 1.0f, 0.0f,
++         0.5f, -0.4f,  0.0f, 0.0f, 1.0f,
++    };
++
++    glVertexAttribPointer(loc_pos, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), verts);
++    glEnableVertexAttribArray(loc_pos);
++    glVertexAttribPointer(loc_color, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), verts + 2);
++    glEnableVertexAttribArray(loc_color);
++    glUniform1f(loc_angle, angle);
++    glDrawArrays(GL_TRIANGLES, 0, 3);
++    glDisableVertexAttribArray(loc_pos);
++    glDisableVertexAttribArray(loc_color);
++
++    // Ensure rendering is complete before submitting buffer to compositor.
++    glFinish();
++    glBindFramebuffer(GL_FRAMEBUFFER, 0);
++}
++
++// --- Frame callback ---
++
++static struct wl_callback* frame_cb;
++static int frame_count = 0;
++
++static void frame_done(void* data, struct wl_callback* cb, uint32_t);
++
++static const struct wl_callback_listener frame_listener = {
++    .done = frame_done,
++};
++
++static void frame_done(void*, struct wl_callback* cb, uint32_t) {
++    wl_callback_destroy(cb);
++
++    // Find a free buffer.
++    int buf_idx = -1;
++    for (int i = 0; i < NUM_BUFFERS; i++) {
++        int idx = (current_buf + i) % NUM_BUFFERS;
++        if (!buffers[idx].busy) {
++            buf_idx = idx;
++            break;
++        }
++    }
++    if (buf_idx < 0) {
++        // All buffers busy — skip this frame.
++        fprintf(stderr, "All buffers busy, skipping frame %d\n", frame_count);
++        frame_cb = wl_surface_frame(wl_surf);
++        wl_callback_add_listener(frame_cb, &frame_listener, nullptr);
++        wl_surface_commit(wl_surf);
++        return;
++    }
++
++    float angle = frame_count * 0.02f;
++    draw_frame(buf_idx, angle);
++    frame_count++;
++    current_buf = (buf_idx + 1) % NUM_BUFFERS;
++
++    buffers[buf_idx].busy = true;
++    wl_surface_attach(wl_surf, buffers[buf_idx].wl_buf, 0, 0);
++    wl_surface_damage(wl_surf, 0, 0, WIDTH, HEIGHT);
++
++    frame_cb = wl_surface_frame(wl_surf);
++    wl_callback_add_listener(frame_cb, &frame_listener, nullptr);
++    wl_surface_commit(wl_surf);
++
++    if (frame_count % 60 == 0) {
++        printf("Frame %d\n", frame_count);
++    }
++}
++
++// --- Main ---
++
++int main(int argc, char** argv) {
++    int max_frames = 300;
++    if (argc > 1) {
++        max_frames = atoi(argv[1]);
++        if (max_frames <= 0) max_frames = 300;
++    }
++
++    // 1. Connect to Wayland.
++    wl_dpy = wl_display_connect(nullptr);
++    if (!wl_dpy) {
++        fprintf(stderr, "Failed to connect to Wayland display.\n"
++                "Set XDG_RUNTIME_DIR=/data/wayland and WAYLAND_DISPLAY=wayland-0\n");
++        return 1;
++    }
++    printf("Connected to Wayland display\n");
++
++    struct wl_registry* registry = wl_display_get_registry(wl_dpy);
++    wl_registry_add_listener(registry, &registry_listener, nullptr);
++    wl_display_roundtrip(wl_dpy);
++
++    if (!wl_comp) { fprintf(stderr, "No wl_compositor\n"); return 1; }
++    if (!wm_base) { fprintf(stderr, "No xdg_wm_base\n"); return 1; }
++    if (!dmabuf_iface) { fprintf(stderr, "No zwp_linux_dmabuf_v1\n"); return 1; }
++
++    // 2. Create surface + xdg_toplevel.
++    wl_surf = wl_compositor_create_surface(wl_comp);
++    xdg_surf = xdg_wm_base_get_xdg_surface(wm_base, wl_surf);
++    xdg_surface_add_listener(xdg_surf, &xdg_surface_listener_impl, nullptr);
++    toplevel = xdg_surface_get_toplevel(xdg_surf);
++    xdg_toplevel_add_listener(toplevel, &toplevel_listener, nullptr);
++    xdg_toplevel_set_title(toplevel, "wayland_egl_test");
++    wl_surface_commit(wl_surf);
++    wl_display_roundtrip(wl_dpy);
++
++    if (!configured) {
++        fprintf(stderr, "Surface not configured\n");
++        return 1;
++    }
++
++    // 3. Initialize Android EGL (default display + pbuffer).
++    if (!init_egl()) {
++        fprintf(stderr, "EGL init failed\n");
++        return 1;
++    }
++
++    if (!init_gl()) {
++        fprintf(stderr, "GL init failed\n");
++        return 1;
++    }
++
++    // 4. Allocate render buffers with EGLImage-backed FBOs + wl_buffer from dmabuf.
++    if (!init_buffers()) {
++        fprintf(stderr, "Buffer init failed\n");
++        return 1;
++    }
++
++    // 5. Render first frame and kick off frame callback loop.
++    draw_frame(0, 0.0f);
++    buffers[0].busy = true;
++    wl_surface_attach(wl_surf, buffers[0].wl_buf, 0, 0);
++    wl_surface_damage(wl_surf, 0, 0, WIDTH, HEIGHT);
++    frame_cb = wl_surface_frame(wl_surf);
++    wl_callback_add_listener(frame_cb, &frame_listener, nullptr);
++    wl_surface_commit(wl_surf);
++    frame_count = 1;
++    current_buf = 1;
++
++    printf("Rendering %d frames...\n", max_frames);
++    while (running && frame_count < max_frames) {
++        if (wl_display_dispatch(wl_dpy) < 0) {
++            fprintf(stderr, "wl_display_dispatch error\n");
++            break;
++        }
++    }
++
++    printf("Done. Rendered %d frames.\n", frame_count);
++
++    // Cleanup: GL objects first (requires current context), then EGL, then Wayland.
++    auto eglDestroyImageKHR_fn = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
++        eglGetProcAddress("eglDestroyImageKHR"));
++
++    for (int i = 0; i < NUM_BUFFERS; i++) {
++        if (buffers[i].fbo) glDeleteFramebuffers(1, &buffers[i].fbo);
++        if (buffers[i].rbo) glDeleteRenderbuffers(1, &buffers[i].rbo);
++    }
++    glDeleteProgram(program);
++    eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++    for (int i = 0; i < NUM_BUFFERS; i++) {
++        if (eglDestroyImageKHR_fn && buffers[i].image != EGL_NO_IMAGE_KHR)
++            eglDestroyImageKHR_fn(egl_display, buffers[i].image);
++        if (buffers[i].wl_buf) wl_buffer_destroy(buffers[i].wl_buf);
++    }
++    eglDestroyContext(egl_display, egl_context);
++    eglTerminate(egl_display);
++
++    xdg_toplevel_destroy(toplevel);
++    xdg_surface_destroy(xdg_surf);
++    wl_surface_destroy(wl_surf);
++    wl_display_disconnect(wl_dpy);
++
++    return 0;
++}
+diff --git a/services/surfaceflinger/tests/wayland_test_client/wayland_shm_test.cpp b/services/surfaceflinger/tests/wayland_test_client/wayland_shm_test.cpp
+new file mode 100644
+index 0000000000..b12736d99f
+--- /dev/null
++++ b/services/surfaceflinger/tests/wayland_test_client/wayland_shm_test.cpp
+@@ -0,0 +1,332 @@
++/*
++ * Copyright (C) 2025 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++// Minimal Wayland SHM test client for the SurfaceFlinger Wayland compositor.
++// CPU-rendered: no EGL, no GPU. Uses wl_shm to share pixel buffers.
++// Renders animated color bars to validate the wl_shm → GraphicBuffer → Layer path.
++
++#include <wayland-client.h>
++#include <xdg-shell-client-protocol.h>
++
++#include <cerrno>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++static const int WIDTH = 256;
++static const int HEIGHT = 256;
++static const int STRIDE = WIDTH * 4; // ARGB8888
++static const int BUF_SIZE = STRIDE * HEIGHT * 2; // double-buffered
++
++static struct wl_display* display;
++static struct wl_compositor* compositor;
++static struct wl_shm* shm;
++static struct xdg_wm_base* wm_base;
++static struct wl_surface* surface;
++static struct xdg_surface* xdg_surf;
++static struct xdg_toplevel* toplevel;
++
++static bool configured = false;
++static bool running = true;
++static int frame_count = 0;
++
++static int shm_fd = -1;
++static uint8_t* shm_data = nullptr;
++static struct wl_shm_pool* pool = nullptr;
++static struct wl_buffer* buffers[2] = {};
++static bool buffer_busy[2] = {};
++static int current_buf = 0;
++
++// --- Shared memory allocation ---
++
++static int create_shm_file(int size) {
++    // memfd_create is available on Android/Linux
++    int fd = memfd_create("wayland_shm_test", MFD_CLOEXEC);
++    if (fd < 0) {
++        perror("memfd_create");
++        return -1;
++    }
++    if (ftruncate(fd, size) < 0) {
++        perror("ftruncate");
++        close(fd);
++        return -1;
++    }
++    return fd;
++}
++
++// --- Buffer release listener ---
++
++static void buffer_release(void* data, struct wl_buffer* /*buffer*/) {
++    int idx = static_cast<int>(reinterpret_cast<intptr_t>(data));
++    buffer_busy[idx] = false;
++}
++
++static const struct wl_buffer_listener buffer_listener = {
++    .release = buffer_release,
++};
++
++// --- wl_shm listener ---
++
++static void shm_format(void* /*data*/, struct wl_shm* /*shm*/, uint32_t format) {
++    if (format == WL_SHM_FORMAT_ARGB8888) {
++        printf("  wl_shm: ARGB8888 supported\n");
++    } else if (format == WL_SHM_FORMAT_XRGB8888) {
++        printf("  wl_shm: XRGB8888 supported\n");
++    }
++}
++
++static const struct wl_shm_listener shm_listener = {
++    .format = shm_format,
++};
++
++// --- xdg listeners ---
++
++static void wm_base_ping(void* /*data*/, struct xdg_wm_base* base, uint32_t serial) {
++    xdg_wm_base_pong(base, serial);
++}
++
++static const struct xdg_wm_base_listener wm_base_listener = {
++    .ping = wm_base_ping,
++};
++
++static void xdg_surface_configure(void* /*data*/, struct xdg_surface* surf, uint32_t serial) {
++    xdg_surface_ack_configure(surf, serial);
++    configured = true;
++}
++
++static const struct xdg_surface_listener xdg_surface_listener_impl = {
++    .configure = xdg_surface_configure,
++};
++
++static void toplevel_configure(void* /*data*/, struct xdg_toplevel* /*tl*/,
++                               int32_t /*width*/, int32_t /*height*/,
++                               struct wl_array* /*states*/) {
++}
++
++static void toplevel_close(void* /*data*/, struct xdg_toplevel* /*tl*/) {
++    running = false;
++}
++
++static const struct xdg_toplevel_listener toplevel_listener = {
++    .configure = toplevel_configure,
++    .close = toplevel_close,
++};
++
++// --- Registry listener ---
++
++static void registry_global(void* /*data*/, struct wl_registry* registry,
++                            uint32_t name, const char* interface, uint32_t version) {
++    if (strcmp(interface, wl_compositor_interface.name) == 0) {
++        compositor = static_cast<struct wl_compositor*>(
++            wl_registry_bind(registry, name, &wl_compositor_interface,
++                             version < 4 ? version : 4));
++    } else if (strcmp(interface, wl_shm_interface.name) == 0) {
++        shm = static_cast<struct wl_shm*>(
++            wl_registry_bind(registry, name, &wl_shm_interface, 1));
++        wl_shm_add_listener(shm, &shm_listener, nullptr);
++    } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
++        wm_base = static_cast<struct xdg_wm_base*>(
++            wl_registry_bind(registry, name, &xdg_wm_base_interface, 1));
++        xdg_wm_base_add_listener(wm_base, &wm_base_listener, nullptr);
++    }
++}
++
++static void registry_global_remove(void* /*data*/, struct wl_registry* /*registry*/,
++                                   uint32_t /*name*/) {
++}
++
++static const struct wl_registry_listener registry_listener = {
++    .global = registry_global,
++    .global_remove = registry_global_remove,
++};
++
++// --- Rendering ---
++
++static void draw_frame(int buf_idx, int frame) {
++    uint32_t* pixels = reinterpret_cast<uint32_t*>(
++        shm_data + buf_idx * STRIDE * HEIGHT);
++
++    // Animated vertical color bars that shift each frame
++    for (int y = 0; y < HEIGHT; y++) {
++        for (int x = 0; x < WIDTH; x++) {
++            int bar = ((x + frame * 2) / 32) % 4;
++            uint32_t color;
++            switch (bar) {
++                case 0: color = 0xFFFF0000; break; // red
++                case 1: color = 0xFF00FF00; break; // green
++                case 2: color = 0xFF0000FF; break; // blue
++                default: color = 0xFFFFFF00; break; // yellow
++            }
++            // Add a horizontal gradient for visual interest
++            uint32_t r = (color >> 16) & 0xFF;
++            uint32_t g = (color >> 8) & 0xFF;
++            uint32_t b = color & 0xFF;
++            uint32_t fade = static_cast<uint32_t>(255 * y / HEIGHT);
++            r = r * fade / 255;
++            g = g * fade / 255;
++            b = b * fade / 255;
++            pixels[y * WIDTH + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
++        }
++    }
++}
++
++// --- Frame callback ---
++
++static void frame_done(void* data, struct wl_callback* cb, uint32_t /*time*/);
++
++static const struct wl_callback_listener frame_listener = {
++    .done = frame_done,
++};
++
++static void submit_frame() {
++    // Find a free buffer (prefer alternating)
++    int idx = current_buf;
++    if (buffer_busy[idx]) {
++        idx = 1 - idx;
++        if (buffer_busy[idx]) {
++            // Both busy — skip frame
++            return;
++        }
++    }
++    current_buf = 1 - idx;
++
++    draw_frame(idx, frame_count);
++    buffer_busy[idx] = true;
++
++    wl_surface_attach(surface, buffers[idx], 0, 0);
++    wl_surface_damage_buffer(surface, 0, 0, WIDTH, HEIGHT);
++
++    struct wl_callback* cb = wl_surface_frame(surface);
++    wl_callback_add_listener(cb, &frame_listener, nullptr);
++
++    wl_surface_commit(surface);
++    frame_count++;
++
++    if (frame_count % 60 == 0) {
++        printf("Frame %d\n", frame_count);
++    }
++}
++
++static void frame_done(void* /*data*/, struct wl_callback* cb, uint32_t /*time*/) {
++    wl_callback_destroy(cb);
++    submit_frame();
++}
++
++// --- Main ---
++
++int main(int argc, char** argv) {
++    int max_frames = 300;
++    if (argc > 1) {
++        max_frames = atoi(argv[1]);
++        if (max_frames <= 0) max_frames = 300;
++    }
++
++    display = wl_display_connect(nullptr);
++    if (!display) {
++        fprintf(stderr, "Failed to connect to Wayland display.\n"
++                "Set XDG_RUNTIME_DIR=/data/wayland and WAYLAND_DISPLAY=wayland-0\n");
++        return 1;
++    }
++    printf("Connected to Wayland display\n");
++
++    struct wl_registry* registry = wl_display_get_registry(display);
++    wl_registry_add_listener(registry, &registry_listener, nullptr);
++    wl_display_roundtrip(display);
++
++    if (!compositor) { fprintf(stderr, "No wl_compositor\n"); return 1; }
++    if (!shm) { fprintf(stderr, "No wl_shm\n"); return 1; }
++    if (!wm_base) { fprintf(stderr, "No xdg_wm_base\n"); return 1; }
++
++    // Do another roundtrip to receive wl_shm format events
++    wl_display_roundtrip(display);
++
++    // Create SHM pool
++    shm_fd = create_shm_file(BUF_SIZE);
++    if (shm_fd < 0) return 1;
++
++    shm_data = static_cast<uint8_t*>(
++        mmap(nullptr, BUF_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0));
++    if (shm_data == MAP_FAILED) {
++        perror("mmap");
++        close(shm_fd);
++        return 1;
++    }
++
++    pool = wl_shm_create_pool(shm, shm_fd, BUF_SIZE);
++    if (!pool) { fprintf(stderr, "wl_shm_create_pool failed\n"); return 1; }
++
++    // Create double buffers from the pool
++    buffers[0] = wl_shm_pool_create_buffer(pool, 0,
++        WIDTH, HEIGHT, STRIDE, WL_SHM_FORMAT_ARGB8888);
++    buffers[1] = wl_shm_pool_create_buffer(pool, STRIDE * HEIGHT,
++        WIDTH, HEIGHT, STRIDE, WL_SHM_FORMAT_ARGB8888);
++
++    wl_buffer_add_listener(buffers[0], &buffer_listener, reinterpret_cast<void*>(0));
++    wl_buffer_add_listener(buffers[1], &buffer_listener, reinterpret_cast<void*>(1));
++
++    printf("SHM pool created: %d bytes, 2 buffers (%dx%d ARGB8888)\n",
++           BUF_SIZE, WIDTH, HEIGHT);
++
++    // Create surface
++    surface = wl_compositor_create_surface(compositor);
++    xdg_surf = xdg_wm_base_get_xdg_surface(wm_base, surface);
++    xdg_surface_add_listener(xdg_surf, &xdg_surface_listener_impl, nullptr);
++
++    toplevel = xdg_surface_get_toplevel(xdg_surf);
++    xdg_toplevel_add_listener(toplevel, &toplevel_listener, nullptr);
++    xdg_toplevel_set_title(toplevel, "wayland_shm_test");
++
++    wl_surface_commit(surface);
++    wl_display_roundtrip(display);
++
++    if (!configured) {
++        fprintf(stderr, "Surface not configured after roundtrip\n");
++        return 1;
++    }
++
++    // Submit first frame
++    printf("Rendering %d frames (SHM, CPU-rendered)...\n", max_frames);
++    submit_frame();
++
++    while (running && frame_count < max_frames) {
++        if (wl_display_dispatch(display) < 0) {
++            fprintf(stderr, "wl_display_dispatch error\n");
++            break;
++        }
++    }
++
++    printf("Done. Rendered %d frames.\n", frame_count);
++
++    // Cleanup
++    wl_buffer_destroy(buffers[0]);
++    wl_buffer_destroy(buffers[1]);
++    wl_shm_pool_destroy(pool);
++    munmap(shm_data, BUF_SIZE);
++    close(shm_fd);
++
++    xdg_toplevel_destroy(toplevel);
++    xdg_surface_destroy(xdg_surf);
++    wl_surface_destroy(surface);
++    wl_shm_destroy(shm);
++    wl_display_disconnect(display);
++
++    return 0;
++}
+-- 
+2.53.0
+
