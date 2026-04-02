@@ -1,6 +1,6 @@
-From d2dbf839b8190aefb5fee64a1310d54a134307ff Mon Sep 17 00:00:00 2001
+From 0e300b9f6846426e6dcef6106a1f4d1f97deb1bb Mon Sep 17 00:00:00 2001
 From: psyclyx <me@psyclyx.xyz>
-Date: Wed, 1 Apr 2026 20:43:53 -0700
+Date: Thu, 2 Apr 2026 02:51:09 -0700
 Subject: [PATCH 1/2] feat: add Wayland compositor to SurfaceFlinger
 
 Embed a Wayland compositor inside SurfaceFlinger that allows native
@@ -21,7 +21,7 @@ BufferState SF Layer.
 
 Ported from lineage-22.1 development tree to lineage-23.2.
 
-Change-Id: Ibe9f9b10edbb89d30bc61d0d88c0dfdc98ef6939
+Change-Id: I51816759e0ecd71f06443e67c8a660bce2e29c7f
 ---
  services/surfaceflinger/Android.bp            |  12 +
  .../surfaceflinger/Scheduler/MessageQueue.h   |   2 +
@@ -1090,7 +1090,7 @@ index 0000000000..4109176421
 +} // namespace android
 diff --git a/services/surfaceflinger/Wayland/WaylandOutput.cpp b/services/surfaceflinger/Wayland/WaylandOutput.cpp
 new file mode 100644
-index 0000000000..f6dcb8c54a
+index 0000000000..ae3a8db22b
 --- /dev/null
 +++ b/services/surfaceflinger/Wayland/WaylandOutput.cpp
 @@ -0,0 +1,100 @@
@@ -1156,7 +1156,7 @@ index 0000000000..f6dcb8c54a
 +    int32_t height = 1080;
 +    int32_t refreshMHz = 60000;
 +
-+    const auto display = flinger->getDefaultDisplayDevice();
++    const auto display = flinger->getPacesetterDisplay();
 +    if (display) {
 +        width = display->getWidth();
 +        height = display->getHeight();

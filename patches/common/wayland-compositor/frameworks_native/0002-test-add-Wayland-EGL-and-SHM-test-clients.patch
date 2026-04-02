@@ -1,6 +1,6 @@
-From cf0ed7629cf9694d475c7cac10620064ab9a2903 Mon Sep 17 00:00:00 2001
+From a2b5d60dd61410e8de21475b74665aa4c7912797 Mon Sep 17 00:00:00 2001
 From: psyclyx <me@psyclyx.xyz>
-Date: Wed, 1 Apr 2026 20:44:13 -0700
+Date: Thu, 2 Apr 2026 02:51:09 -0700
 Subject: [PATCH 2/2] test: add Wayland EGL and SHM test clients
 
 Add test clients for validating the Wayland compositor:
@@ -9,11 +9,7 @@ Add test clients for validating the Wayland compositor:
 - wayland_shm_test: shared memory rendering path test client
 - run_integration_test.sh: automated integration test script
 
-These test clients connect to the SF Wayland compositor socket,
-create surfaces, and render test patterns to validate the full
-buffer import and composition pipeline.
-
-Change-Id: I8722d47f390975066f426b6339cb7b0dff9332c8
+Change-Id: I87244862c771dd51134f222147f19b5d4bd9f986
 ---
  .../tests/wayland_test_client/Android.bp      |  59 ++
  .../run_integration_test.sh                   | 260 ++++++++
