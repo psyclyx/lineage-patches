@@ -1,0 +1,39 @@
+From 63ffe340dca78604c525d488d8aafd4046867db1 Mon Sep 17 00:00:00 2001
+From: psyclyx <me@psyclyx.xyz>
+Date: Wed, 1 Apr 2026 23:40:01 -0700
+Subject: [PATCH] feat: add libwayland_egl static library for Wayland EGL
+ clients
+
+Change-Id: Icc0e192700a7a85ed196ae95f1d484a5c1f2f2ce
+---
+ Android.bp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/Android.bp b/Android.bp
+index b3709e0..5a98d80 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -150,6 +150,20 @@ cc_library_host_shared {
+     generated_sources: ["wayland_core_protocol_sources_shared"],
+ }
+ 
++// Build wayland_egl (wl_egl_window helper used by Wayland EGL clients)
++cc_library_static {
++    name: "libwayland_egl",
++    vendor_available: true,
++    defaults: ["wayland_defaults"],
++    srcs: ["egl/wayland-egl.c"],
++    local_include_dirs: ["src", "egl"],
++    generated_headers: [
++        "wayland_core_client_protocol_headers",
++    ],
++    static_libs: ["libffi"],
++    export_include_dirs: ["egl"],
++}
++
+ // Build wayland_server
+ cc_library_static {
+     name: "libwayland_server",
+-- 
+2.53.0
+

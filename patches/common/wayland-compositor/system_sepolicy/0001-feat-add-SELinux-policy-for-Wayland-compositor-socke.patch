@@ -1,0 +1,92 @@
+From a3440e52e80a6ffeb8bcbbd5607f63cfbb9f326b Mon Sep 17 00:00:00 2001
+From: psyclyx <me@psyclyx.xyz>
+Date: Wed, 1 Apr 2026 23:39:38 -0700
+Subject: [PATCH] feat: add SELinux policy for Wayland compositor socket
+
+Change-Id: I9760126e174ccefea996bbf254042ffda9518559
+---
+ contexts/file_contexts_test_data | 2 ++
+ private/file.te                  | 3 +++
+ private/file_contexts            | 1 +
+ private/shell.te                 | 5 +++++
+ private/surfaceflinger.te        | 9 +++++++++
+ 5 files changed, 20 insertions(+)
+
+diff --git a/contexts/file_contexts_test_data b/contexts/file_contexts_test_data
+index f1a0a8708..7a2dd7451 100644
+--- a/contexts/file_contexts_test_data
++++ b/contexts/file_contexts_test_data
+@@ -1122,6 +1122,8 @@
+ /data/misc/trace/test                                             method_trace_data_file
+ /data/misc/wmtrace                                                wm_trace_data_file
+ /data/misc/wmtrace/test                                           wm_trace_data_file
++/data/wayland                                                     wayland_socket_data_file
++/data/wayland/wayland-0                                           wayland_socket_data_file
+ /data/misc/profiles/cur/0                                         user_profile_root_file
+ /data/misc/profiles/cur/9                                         user_profile_root_file
+ /data/misc/profiles/cur/0/test                                    user_profile_data_file
+diff --git a/private/file.te b/private/file.te
+index b832da44c..cf0717d49 100644
+--- a/private/file.te
++++ b/private/file.te
+@@ -27,6 +27,9 @@ type storaged_data_file, file_type, data_file_type, core_data_file_type;
+ # /data/misc/wmtrace for wm traces
+ type wm_trace_data_file, file_type, data_file_type, core_data_file_type, mlstrustedobject;
+ 
++# /data/wayland for Wayland compositor socket
++type wayland_socket_data_file, file_type, data_file_type, core_data_file_type;
++
+ # /data/misc/a11ytrace for accessibility traces
+ type accessibility_trace_data_file, file_type, data_file_type, core_data_file_type;
+ 
+diff --git a/private/file_contexts b/private/file_contexts
+index 37c74cb2f..73cb60895 100644
+--- a/private/file_contexts
++++ b/private/file_contexts
+@@ -741,6 +741,7 @@
+ /data/system/heapdump(/.*)?     u:object_r:heapdump_data_file:s0
+ /data/misc/trace(/.*)?          u:object_r:method_trace_data_file:s0
+ /data/misc/wmtrace(/.*)?        u:object_r:wm_trace_data_file:s0
++/data/wayland(/.*)?             u:object_r:wayland_socket_data_file:s0
+ # TODO(calin) label profile reference differently so that only
+ # profman run as a special user can write to them
+ /data/misc/profiles/cur(/[0-9]+)?   u:object_r:user_profile_root_file:s0
+diff --git a/private/shell.te b/private/shell.te
+index 1a7e30aec..0ba712303 100644
+--- a/private/shell.te
++++ b/private/shell.te
+@@ -78,6 +78,11 @@ allow shell perfetto_configs_data_file:file create_file_perms;
+ # Allow shell to run adb shell cmd gpu commands.
+ binder_call(shell, gpuservice);
+ 
++# Wayland test client: connect to SurfaceFlinger's Wayland socket
++allow shell wayland_socket_data_file:dir { open read search getattr };
++allow shell wayland_socket_data_file:sock_file { read write getattr };
++allow shell surfaceflinger:unix_stream_socket connectto;
++
+ # Allow shell to use atrace HAL
+ hal_client_domain(shell, hal_atrace)
+ 
+diff --git a/private/surfaceflinger.te b/private/surfaceflinger.te
+index f4f64ce4a..9119efd02 100644
+--- a/private/surfaceflinger.te
++++ b/private/surfaceflinger.te
+@@ -80,6 +80,15 @@ userdebug_or_eng(`
+   allow surfaceflinger wm_trace_data_file:file { getattr setattr create w_file_perms };
+ ')
+ 
++# Wayland compositor: create/manage /data/wayland dir and unix socket
++allow surfaceflinger system_data_file:dir search;
++allow surfaceflinger wayland_socket_data_file:dir create_dir_perms;
++allow surfaceflinger wayland_socket_data_file:file create_file_perms;
++allow surfaceflinger wayland_socket_data_file:sock_file { create setattr unlink write };
++allow surfaceflinger self:unix_stream_socket { create bind listen accept read write getattr };
++# Wayland clients pass memfds (wl_shm) over the socket; SF must read/mmap them.
++allow surfaceflinger appdomain_tmpfs:file { read write map getattr };
++
+ # Needed to register as a Perfetto producer.
+ perfetto_producer(surfaceflinger)
+ 
+-- 
+2.53.0
+
