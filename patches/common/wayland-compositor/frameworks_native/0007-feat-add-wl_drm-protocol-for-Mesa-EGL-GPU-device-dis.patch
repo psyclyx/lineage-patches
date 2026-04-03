@@ -1,0 +1,456 @@
+From 10be656e73b2386e7189dbf9942485885dad3d97 Mon Sep 17 00:00:00 2001
+From: psyclyx <me@psyclyx.xyz>
+Date: Fri, 3 Apr 2026 08:28:28 -0700
+Subject: [PATCH] feat: add wl_drm protocol for Mesa EGL GPU device discovery
+
+Mesa's EGL Wayland platform uses the wl_drm protocol to discover which
+DRM render node to open for GPU-accelerated rendering. Without this,
+eglInitialize() fails because it cannot find a GPU device.
+
+The implementation:
+- Advertises /dev/dri/renderD128 as the DRM device
+- Sends supported pixel formats and PRIME capability
+- Handles authenticate as a no-op (render nodes skip DRM auth)
+- Rejects create_buffer/create_prime_buffer (clients use linux-dmabuf)
+
+This enables EGL initialization for chroot Wayland clients (e.g. GTK4
+apps running in Arch Linux ARM) that need hardware-accelerated GL via
+Mesa's Freedreno/kgsl Gallium driver.
+
+Change-Id: I9712a39e669e30528f212c062c2604b36643aa66
+---
+ services/surfaceflinger/Android.bp            |   2 +
+ .../Wayland/WaylandCompositor.cpp             |   6 +
+ .../Wayland/WaylandCompositor.h               |   1 +
+ .../surfaceflinger/Wayland/WaylandDrm.cpp     | 129 ++++++++++++++++++
+ services/surfaceflinger/Wayland/WaylandDrm.h  |  66 +++++++++
+ .../Wayland/wayland-drm-protocol.c            |  59 ++++++++
+ .../Wayland/wayland-drm-server-protocol.h     |  99 ++++++++++++++
+ 7 files changed, 362 insertions(+)
+ create mode 100644 services/surfaceflinger/Wayland/WaylandDrm.cpp
+ create mode 100644 services/surfaceflinger/Wayland/WaylandDrm.h
+ create mode 100644 services/surfaceflinger/Wayland/wayland-drm-protocol.c
+ create mode 100644 services/surfaceflinger/Wayland/wayland-drm-server-protocol.h
+
+diff --git a/services/surfaceflinger/Android.bp b/services/surfaceflinger/Android.bp
+index 7373501bac..7e559659e0 100644
+--- a/services/surfaceflinger/Android.bp
++++ b/services/surfaceflinger/Android.bp
+@@ -282,6 +282,8 @@ filegroup {
+         "Wayland/WaylandCompositor.cpp",
+         "Wayland/WaylandDataDevice.cpp",
+         "Wayland/WaylandDmabuf.cpp",
++        "Wayland/WaylandDrm.cpp",
++        "Wayland/wayland-drm-protocol.c",
+         "Wayland/WaylandOutput.cpp",
+         "Wayland/WaylandSeat.cpp",
+         "Wayland/WaylandShm.cpp",
+diff --git a/services/surfaceflinger/Wayland/WaylandCompositor.cpp b/services/surfaceflinger/Wayland/WaylandCompositor.cpp
+index 33cbc8aca3..6ee1f12b00 100644
+--- a/services/surfaceflinger/Wayland/WaylandCompositor.cpp
++++ b/services/surfaceflinger/Wayland/WaylandCompositor.cpp
+@@ -158,6 +158,12 @@ bool WaylandCompositor::init(const sp<Looper>& /*looper*/) {
+         return false;
+     }
+ 
++    // Register wl_drm global (Mesa EGL uses this to discover the DRM render node).
++    if (!WaylandDrm::createGlobal(mDisplay, this)) {
++        ALOGE("Failed to create wl_drm global");
++        return false;
++    }
++
+     // Register xdg_wm_base global.
+     if (!WaylandXdgShell::createGlobal(mDisplay, this)) {
+         ALOGE("Failed to create xdg_wm_base global");
+diff --git a/services/surfaceflinger/Wayland/WaylandCompositor.h b/services/surfaceflinger/Wayland/WaylandCompositor.h
+index 5f9e8db458..2f754d9696 100644
+--- a/services/surfaceflinger/Wayland/WaylandCompositor.h
++++ b/services/surfaceflinger/Wayland/WaylandCompositor.h
+@@ -27,6 +27,7 @@
+ #include <vector>
+ 
+ #include "WaylandDmabuf.h"
++#include "WaylandDrm.h"
+ #include "WaylandOutput.h"
+ #include "WaylandSeat.h"
+ #include "WaylandShm.h"
+diff --git a/services/surfaceflinger/Wayland/WaylandDrm.cpp b/services/surfaceflinger/Wayland/WaylandDrm.cpp
+new file mode 100644
+index 0000000000..7f6738c952
+--- /dev/null
++++ b/services/surfaceflinger/Wayland/WaylandDrm.cpp
+@@ -0,0 +1,129 @@
++/*
++ * Copyright (C) 2025 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#undef LOG_TAG
++#define LOG_TAG "WaylandDrm"
++
++#include "WaylandDrm.h"
++
++#include <algorithm>
++#include <drm_fourcc.h>
++#include <log/log.h>
++#include <unistd.h>
++
++#include "wayland-drm-server-protocol.h"
++
++namespace android {
++
++namespace {
++
++constexpr uint32_t kDrmVersion = 2;
++constexpr const char* kRenderNode = "/dev/dri/renderD128";
++
++// Formats advertised via wl_drm.format events.
++const uint32_t kFormats[] = {
++        DRM_FORMAT_ARGB8888,
++        DRM_FORMAT_XRGB8888,
++        DRM_FORMAT_ABGR8888,
++        DRM_FORMAT_XBGR8888,
++};
++
++} // anonymous namespace
++
++const struct wl_drm_interface WaylandDrm::kImpl = {
++        .authenticate = WaylandDrm::authenticate,
++        .create_buffer = WaylandDrm::createBuffer,
++        .create_planar_buffer = WaylandDrm::createPlanarBuffer,
++        .create_prime_buffer = WaylandDrm::createPrimeBuffer,
++};
++
++struct wl_global* WaylandDrm::createGlobal(struct wl_display* display,
++                                             WaylandCompositor* compositor) {
++    return wl_global_create(display, &wl_drm_interface, kDrmVersion, compositor, bind);
++}
++
++void WaylandDrm::bind(struct wl_client* client, void* data,
++                       uint32_t version, uint32_t id) {
++    int ver = static_cast<int>(std::min(version, kDrmVersion));
++    struct wl_resource* resource =
++            wl_resource_create(client, &wl_drm_interface, ver, id);
++    if (!resource) {
++        wl_client_post_no_memory(client);
++        return;
++    }
++    wl_resource_set_implementation(resource, &kImpl, data, nullptr);
++
++    // Tell the client which DRM device to open.
++    wl_drm_send_device(resource, kRenderNode);
++
++    // Advertise supported formats.
++    for (uint32_t fmt : kFormats) {
++        wl_drm_send_format(resource, fmt);
++    }
++
++    // Advertise PRIME (dmabuf fd) capability.
++    if (ver >= 2) {
++        wl_drm_send_capabilities(resource, WL_DRM_CAPABILITY_PRIME);
++    }
++
++    ALOGI("wl_drm bound (v%d), device=%s", ver, kRenderNode);
++}
++
++void WaylandDrm::authenticate(struct wl_client* /*client*/,
++                               struct wl_resource* resource,
++                               uint32_t /*id*/) {
++    // Render nodes (/dev/dri/renderDN) do not require DRM authentication.
++    // Just confirm success so the client proceeds.
++    wl_drm_send_authenticated(resource);
++}
++
++void WaylandDrm::createBuffer(struct wl_client* /*client*/,
++                               struct wl_resource* resource,
++                               uint32_t /*id*/, uint32_t /*name*/,
++                               int32_t /*width*/, int32_t /*height*/,
++                               uint32_t /*stride*/, uint32_t /*format*/) {
++    // GEM flink names are not supported — clients should use linux-dmabuf.
++    wl_resource_post_error(resource, WL_DRM_ERROR_INVALID_NAME,
++                           "wl_drm.create_buffer not supported, use linux-dmabuf");
++}
++
++void WaylandDrm::createPlanarBuffer(struct wl_client* /*client*/,
++                                     struct wl_resource* resource,
++                                     uint32_t /*id*/, uint32_t /*name*/,
++                                     int32_t /*width*/, int32_t /*height*/,
++                                     uint32_t /*format*/,
++                                     int32_t /*offset0*/, int32_t /*stride0*/,
++                                     int32_t /*offset1*/, int32_t /*stride1*/,
++                                     int32_t /*offset2*/, int32_t /*stride2*/) {
++    wl_resource_post_error(resource, WL_DRM_ERROR_INVALID_NAME,
++                           "wl_drm.create_planar_buffer not supported, use linux-dmabuf");
++}
++
++void WaylandDrm::createPrimeBuffer(struct wl_client* /*client*/,
++                                    struct wl_resource* resource,
++                                    uint32_t /*id*/, int32_t fd,
++                                    int32_t /*width*/, int32_t /*height*/,
++                                    uint32_t /*format*/,
++                                    int32_t /*offset0*/, int32_t /*stride0*/,
++                                    int32_t /*offset1*/, int32_t /*stride1*/,
++                                    int32_t /*offset2*/, int32_t /*stride2*/) {
++    // Close the fd the client sent — we won't use it.
++    close(fd);
++    wl_resource_post_error(resource, WL_DRM_ERROR_INVALID_NAME,
++                           "wl_drm.create_prime_buffer not supported, use linux-dmabuf");
++}
++
++} // namespace android
+diff --git a/services/surfaceflinger/Wayland/WaylandDrm.h b/services/surfaceflinger/Wayland/WaylandDrm.h
+new file mode 100644
+index 0000000000..07048e555d
+--- /dev/null
++++ b/services/surfaceflinger/Wayland/WaylandDrm.h
+@@ -0,0 +1,66 @@
++/*
++ * Copyright (C) 2025 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <wayland-server-core.h>
++
++namespace android {
++
++class WaylandCompositor;
++
++// Implements the wl_drm protocol (version 2).
++// Mesa's EGL Wayland platform uses this to discover the DRM render node
++// for GPU-accelerated rendering. The compositor advertises the device path
++// and handles the (no-op for render nodes) authentication handshake.
++class WaylandDrm {
++public:
++    static struct wl_global* createGlobal(struct wl_display* display,
++                                           WaylandCompositor* compositor);
++
++private:
++    static void bind(struct wl_client* client, void* data,
++                     uint32_t version, uint32_t id);
++
++    static void authenticate(struct wl_client* client,
++                             struct wl_resource* resource,
++                             uint32_t id);
++    static void createBuffer(struct wl_client* client,
++                             struct wl_resource* resource,
++                             uint32_t id, uint32_t name,
++                             int32_t width, int32_t height,
++                             uint32_t stride, uint32_t format);
++    static void createPlanarBuffer(struct wl_client* client,
++                                   struct wl_resource* resource,
++                                   uint32_t id, uint32_t name,
++                                   int32_t width, int32_t height,
++                                   uint32_t format,
++                                   int32_t offset0, int32_t stride0,
++                                   int32_t offset1, int32_t stride1,
++                                   int32_t offset2, int32_t stride2);
++    static void createPrimeBuffer(struct wl_client* client,
++                                  struct wl_resource* resource,
++                                  uint32_t id, int32_t fd,
++                                  int32_t width, int32_t height,
++                                  uint32_t format,
++                                  int32_t offset0, int32_t stride0,
++                                  int32_t offset1, int32_t stride1,
++                                  int32_t offset2, int32_t stride2);
++
++    static const struct wl_drm_interface kImpl;
++};
++
++} // namespace android
+diff --git a/services/surfaceflinger/Wayland/wayland-drm-protocol.c b/services/surfaceflinger/Wayland/wayland-drm-protocol.c
+new file mode 100644
+index 0000000000..c19cc348a3
+--- /dev/null
++++ b/services/surfaceflinger/Wayland/wayland-drm-protocol.c
+@@ -0,0 +1,59 @@
++/* Generated by wayland-scanner — wl_drm protocol marshalling. */
++
++#include <stdlib.h>
++#include <stdint.h>
++#include "wayland-util.h"
++
++extern const struct wl_interface wl_buffer_interface;
++
++static const struct wl_interface *drm_types[] = {
++	NULL,
++	&wl_buffer_interface,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	&wl_buffer_interface,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	&wl_buffer_interface,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++	NULL,
++};
++
++static const struct wl_message wl_drm_requests[] = {
++	{ "authenticate", "u", drm_types + 0 },
++	{ "create_buffer", "nuiiuu", drm_types + 1 },
++	{ "create_planar_buffer", "nuiiuiiiiii", drm_types + 7 },
++	{ "create_prime_buffer", "2nhiiuiiiiii", drm_types + 18 },
++};
++
++static const struct wl_message wl_drm_events[] = {
++	{ "device", "s", drm_types + 0 },
++	{ "format", "u", drm_types + 0 },
++	{ "authenticated", "", drm_types + 0 },
++	{ "capabilities", "u", drm_types + 0 },
++};
++
++const struct wl_interface wl_drm_interface = {
++	"wl_drm", 2,
++	4, wl_drm_requests,
++	4, wl_drm_events,
++};
+diff --git a/services/surfaceflinger/Wayland/wayland-drm-server-protocol.h b/services/surfaceflinger/Wayland/wayland-drm-server-protocol.h
+new file mode 100644
+index 0000000000..bd66155c7d
+--- /dev/null
++++ b/services/surfaceflinger/Wayland/wayland-drm-server-protocol.h
+@@ -0,0 +1,99 @@
++/* Generated by wayland-scanner — wl_drm server protocol for Mesa EGL device discovery. */
++
++#ifndef DRM_SERVER_PROTOCOL_H
++#define DRM_SERVER_PROTOCOL_H
++
++#include <stdint.h>
++#include <stddef.h>
++#include "wayland-server.h"
++
++#ifdef  __cplusplus
++extern "C" {
++#endif
++
++struct wl_buffer;
++struct wl_drm;
++
++extern const struct wl_interface wl_drm_interface;
++
++#ifndef WL_DRM_CAPABILITY_ENUM
++#define WL_DRM_CAPABILITY_ENUM
++enum wl_drm_capability {
++	WL_DRM_CAPABILITY_PRIME = 1,
++};
++#endif
++
++struct wl_drm_interface {
++	void (*authenticate)(struct wl_client *client,
++			     struct wl_resource *resource,
++			     uint32_t id);
++	void (*create_buffer)(struct wl_client *client,
++			      struct wl_resource *resource,
++			      uint32_t id,
++			      uint32_t name,
++			      int32_t width,
++			      int32_t height,
++			      uint32_t stride,
++			      uint32_t format);
++	void (*create_planar_buffer)(struct wl_client *client,
++				     struct wl_resource *resource,
++				     uint32_t id,
++				     uint32_t name,
++				     int32_t width,
++				     int32_t height,
++				     uint32_t format,
++				     int32_t offset0,
++				     int32_t stride0,
++				     int32_t offset1,
++				     int32_t stride1,
++				     int32_t offset2,
++				     int32_t stride2);
++	void (*create_prime_buffer)(struct wl_client *client,
++				    struct wl_resource *resource,
++				    uint32_t id,
++				    int32_t name,
++				    int32_t width,
++				    int32_t height,
++				    uint32_t format,
++				    int32_t offset0,
++				    int32_t stride0,
++				    int32_t offset1,
++				    int32_t stride1,
++				    int32_t offset2,
++				    int32_t stride2);
++};
++
++#define WL_DRM_DEVICE 0
++#define WL_DRM_FORMAT 1
++#define WL_DRM_AUTHENTICATED 2
++#define WL_DRM_CAPABILITIES 3
++
++static inline void
++wl_drm_send_device(struct wl_resource *resource_, const char *name)
++{
++	wl_resource_post_event(resource_, WL_DRM_DEVICE, name);
++}
++
++static inline void
++wl_drm_send_format(struct wl_resource *resource_, uint32_t format)
++{
++	wl_resource_post_event(resource_, WL_DRM_FORMAT, format);
++}
++
++static inline void
++wl_drm_send_authenticated(struct wl_resource *resource_)
++{
++	wl_resource_post_event(resource_, WL_DRM_AUTHENTICATED);
++}
++
++static inline void
++wl_drm_send_capabilities(struct wl_resource *resource_, uint32_t value)
++{
++	wl_resource_post_event(resource_, WL_DRM_CAPABILITIES, value);
++}
++
++#ifdef  __cplusplus
++}
++#endif
++
++#endif
+-- 
+2.53.0
+

@@ -1,0 +1,363 @@
+From fbc474148d35a91b5a3812fb814b8bd0302da8ae Mon Sep 17 00:00:00 2001
+From: psyclyx <me@psyclyx.xyz>
+Date: Fri, 3 Apr 2026 15:12:08 -0700
+Subject: [PATCH] fix: async buffer import to prevent SF deadlock with Vulkan
+ WSI
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Move gralloc allocation, pixel copy, and setTransactionState() off the
+Wayland dispatch thread onto a dedicated buffer submission thread.
+
+Vulkan WSI clients (e.g. GTK4 with GSK_RENDERER=vulkan via Turnip+Zink)
+use proxy wrappers with private event queues and do nested
+wl_display_dispatch_queue() calls during rendering. If the dispatch
+thread blocks on gralloc or SF transaction locks while processing a
+wl_surface.commit, the client's nested dispatch deadlocks waiting for
+compositor responses, which in turn deadlocks SurfaceFlinger.
+
+The fix:
+- SHM path: snapshot pixel data via fast memcpy on the dispatch thread,
+  then post gralloc alloc + BGRA→RGBA swizzle + setTransactionState to
+  a worker thread
+- Dmabuf path: post the pre-built GraphicBuffer + setTransactionState
+  to the same worker thread
+- Fix duplicate xdg_surface configure serials: use the xdg_surface's
+  pendingConfigureSerial counter for Activity bridge configures instead
+  of a separate WaylandSurface counter
+
+Tested: SurfaceFlinger no longer deadlocks after Vulkan WSI clients
+run. Cairo/SHM rendering continues to work correctly.
+
+Change-Id: Ib3c4f8e2a1d9e7f6c5b4a3d2e1f0a9b8c7d6e5f4
+---
+ .../Wayland/WaylandCompositor.cpp             | 107 ++++++++++++++++-
+ .../Wayland/WaylandCompositor.h               |  28 +++++
+ .../surfaceflinger/Wayland/WaylandSurface.cpp | 108 +++++-------------
+ 3 files changed, 164 insertions(+), 79 deletions(-)
+
+diff --git a/services/surfaceflinger/Wayland/WaylandCompositor.cpp b/services/surfaceflinger/Wayland/WaylandCompositor.cpp
+index 6ee1f12b00..46347c0e63 100644
+--- a/services/surfaceflinger/Wayland/WaylandCompositor.cpp
++++ b/services/surfaceflinger/Wayland/WaylandCompositor.cpp
+@@ -102,6 +102,11 @@ WaylandCompositor::~WaylandCompositor() {
+     if (mDispatchThread.joinable()) {
+         mDispatchThread.join();
+     }
++    // Wake and join the buffer thread.
++    mBufferCv.notify_all();
++    if (mBufferThread.joinable()) {
++        mBufferThread.join();
++    }
+     mSurfaces.clear();
+     if (mWakeEventFd >= 0) {
+         close(mWakeEventFd);
+@@ -235,6 +240,10 @@ bool WaylandCompositor::init(const sp<Looper>& /*looper*/) {
+         }
+     });
+ 
++    // Buffer submission thread — handles gralloc alloc + setTransactionState
++    // off the Wayland dispatch thread to avoid deadlocking with SF or Vulkan WSI.
++    mBufferThread = std::thread([this]() { bufferThreadLoop(); });
++
+     ALOGI("Wayland compositor listening on %s (wl_compositor v%u)", socketPath.c_str(),
+           kCompositorVersion);
+     return true;
+@@ -723,8 +732,15 @@ void WaylandCompositor::doFireFrameCallbacksAndReleases() {
+                 *s = 4; // XDG_TOPLEVEL_STATE_ACTIVATED
+                 xdg_toplevel_send_configure(ws->xdgToplevel, ev.i1, ev.i2, &states);
+                 wl_array_release(&states);
+-                ws->configureSerial++;
+-                xdg_surface_send_configure(ws->xdgSurface, ws->configureSerial);
++                // Use the xdg_surface's serial counter (same one used for initial configure)
++                // to avoid duplicate serials which violate the xdg_surface protocol.
++                auto* xdgSurf = static_cast<WaylandXdgSurface*>(
++                        wl_resource_get_user_data(ws->xdgSurface));
++                if (xdgSurf) {
++                    xdgSurf->pendingConfigureSerial++;
++                    xdg_surface_send_configure(ws->xdgSurface,
++                                               xdgSurf->pendingConfigureSerial);
++                }
+                 ALOGI("Sent toplevel configure %dx%d for layer %d", ev.i1, ev.i2, ev.layerId);
+                 break;
+             }
+@@ -778,4 +794,91 @@ void WaylandCompositor::notifyBufferDestroyed(struct wl_resource* buffer) {
+     }
+ }
+ 
++void WaylandCompositor::postBufferWork(BufferWork&& work) {
++    {
++        std::lock_guard<std::mutex> lock(mBufferMutex);
++        mBufferQueue.push_back(std::move(work));
++    }
++    mBufferCv.notify_one();
++}
++
++void WaylandCompositor::bufferThreadLoop() {
++    while (!mDispatchStop) {
++        std::vector<BufferWork> work;
++        {
++            std::unique_lock<std::mutex> lock(mBufferMutex);
++            mBufferCv.wait(lock, [this]() REQUIRES(mBufferMutex) {
++                return mDispatchStop.load() || !mBufferQueue.empty();
++            });
++            if (mDispatchStop.load() && mBufferQueue.empty()) break;
++            work.swap(mBufferQueue);
++        }
++
++        for (auto& item : work) {
++            sp<GraphicBuffer> gb = item.gb;
++
++            // If we have raw pixel data, do the gralloc alloc + copy here
++            // (off the Wayland dispatch thread).
++            if (!item.pixels.empty() && !gb) {
++                gb = sp<GraphicBuffer>::make(
++                        static_cast<uint32_t>(item.width),
++                        static_cast<uint32_t>(item.height),
++                        item.pixFmt, 1u,
++                        static_cast<uint64_t>(GRALLOC_USAGE_SW_WRITE_OFTEN |
++                                              GRALLOC_USAGE_HW_TEXTURE |
++                                              GRALLOC_USAGE_HW_COMPOSER),
++                        "WaylandShm");
++                if (gb->initCheck() != NO_ERROR) {
++                    ALOGE("BufferThread: GraphicBuffer alloc failed");
++                    continue;
++                }
++                void* dst = nullptr;
++                if (gb->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, &dst) != NO_ERROR || !dst) {
++                    ALOGE("BufferThread: GraphicBuffer lock failed");
++                    continue;
++                }
++                const uint32_t bpp = bytesPerPixel(item.pixFmt);
++                const uint8_t* src = item.pixels.data();
++                uint8_t* dstBytes = static_cast<uint8_t*>(dst);
++                const uint32_t dstStride = gb->getStride() * bpp;
++                const uint32_t w = static_cast<uint32_t>(item.width);
++                const uint32_t h = static_cast<uint32_t>(item.height);
++                for (uint32_t y = 0; y < h; y++) {
++                    const uint32_t* srcRow =
++                            reinterpret_cast<const uint32_t*>(src + y * item.srcStride);
++                    uint32_t* dstRow =
++                            reinterpret_cast<uint32_t*>(dstBytes + y * dstStride);
++                    for (uint32_t x = 0; x < w; x++) {
++                        uint32_t px = srcRow[x];
++                        uint32_t b = (px >> 0) & 0xFF;
++                        uint32_t g = (px >> 8) & 0xFF;
++                        uint32_t r = (px >> 16) & 0xFF;
++                        uint32_t a = (px >> 24) & 0xFF;
++                        dstRow[x] = (a << 24) | (b << 16) | (g << 8) | r;
++                    }
++                }
++                gb->unlock();
++            }
++
++            if (!gb) continue;
++
++            TransactionState txn;
++            ComposerState cs;
++            cs.state.what = layer_state_t::eBufferChanged | layer_state_t::eCropChanged;
++            cs.state.surface = item.handle;
++            cs.state.bufferData = std::make_shared<BufferData>();
++            cs.state.bufferData->buffer = gb;
++            cs.state.bufferData->frameNumber = item.frameNumber;
++            cs.state.bufferData->flags |= BufferData::BufferDataChange::frameNumberChanged;
++            cs.state.bufferData->acquireFence = Fence::NO_FENCE;
++            cs.state.bufferData->producerId = item.producerId;
++            cs.state.crop = FloatRect(0, 0, item.width, item.height);
++            txn.mComposerStates.push_back(std::move(cs));
++            txn.mId = (static_cast<uint64_t>(item.layerId) << 32) | item.frameNumber;
++            txn.mIsAutoTimestamp = true;
++            mFlinger.setTransactionState(std::move(txn), /*applyToken=*/nullptr);
++        }
++    }
++}
++
+ } // namespace android
+diff --git a/services/surfaceflinger/Wayland/WaylandCompositor.h b/services/surfaceflinger/Wayland/WaylandCompositor.h
+index 2f754d9696..1db9307319 100644
+--- a/services/surfaceflinger/Wayland/WaylandCompositor.h
++++ b/services/surfaceflinger/Wayland/WaylandCompositor.h
+@@ -20,12 +20,15 @@
+ #include <utils/Looper.h>
+ 
+ #include <atomic>
++#include <condition_variable>
+ #include <memory>
+ #include <mutex>
+ #include <thread>
+ #include <unordered_map>
+ #include <vector>
+ 
++#include <ui/GraphicBuffer.h>
++
+ #include "WaylandDmabuf.h"
+ #include "WaylandDrm.h"
+ #include "WaylandOutput.h"
+@@ -156,6 +159,31 @@ private:
+ 
+     // Actually fire frame callbacks/releases (called on Wayland thread).
+     void doFireFrameCallbacksAndReleases();
++
++    // --- Buffer submission thread ---
++    // Buffer imports (gralloc alloc + pixel copy + setTransactionState) are posted
++    // to a dedicated thread to avoid blocking the Wayland dispatch thread, which
++    // would cause deadlocks with Vulkan WSI clients that do nested event dispatch.
++public:
++    struct BufferWork {
++        sp<IBinder> handle;
++        sp<GraphicBuffer> gb; // pre-built GraphicBuffer (dmabuf path)
++        std::vector<uint8_t> pixels; // raw pixel data (SHM path, empty for dmabuf)
++        PixelFormat pixFmt;
++        uint32_t srcStride;
++        uint64_t frameNumber;
++        uint32_t producerId;
++        uint32_t layerId;
++        int32_t width;
++        int32_t height;
++    };
++    void postBufferWork(BufferWork&& work);
++private:
++    std::thread mBufferThread;
++    std::mutex mBufferMutex;
++    std::condition_variable mBufferCv;
++    std::vector<BufferWork> mBufferQueue; // protected by mBufferMutex
++    void bufferThreadLoop();
+ };
+ 
+ } // namespace android
+diff --git a/services/surfaceflinger/Wayland/WaylandSurface.cpp b/services/surfaceflinger/Wayland/WaylandSurface.cpp
+index 74d25f1850..87f8a5d36c 100644
+--- a/services/surfaceflinger/Wayland/WaylandSurface.cpp
++++ b/services/surfaceflinger/Wayland/WaylandSurface.cpp
+@@ -321,22 +321,17 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf) {
+ 
+     ++frameNumber;
+ 
+-    // Build transaction to set buffer + crop via the front-end path.
+-    TransactionState txn;
+-    ComposerState cs;
+-    cs.state.what = layer_state_t::eBufferChanged | layer_state_t::eCropChanged;
+-    cs.state.surface = handle;
+-    cs.state.bufferData = std::make_shared<BufferData>();
+-    cs.state.bufferData->buffer = gb;
+-    cs.state.bufferData->frameNumber = frameNumber;
+-    cs.state.bufferData->flags |= BufferData::BufferDataChange::frameNumberChanged;
+-    cs.state.bufferData->acquireFence = Fence::NO_FENCE;
+-    cs.state.bufferData->producerId = producerId;
+-    cs.state.crop = FloatRect(0, 0, dmabuf->width, dmabuf->height);
+-    txn.mComposerStates.push_back(std::move(cs));
+-    txn.mId = (static_cast<uint64_t>(layerId) << 32) | frameNumber;
+-    txn.mIsAutoTimestamp = true;
+-    compositor->flinger().setTransactionState(std::move(txn), /*applyToken=*/nullptr);
++    // Post the SF transaction to a dedicated buffer thread to avoid blocking
++    // the Wayland dispatch thread.
++    WaylandCompositor::BufferWork bw;
++    bw.handle = handle;
++    bw.gb = gb;
++    bw.frameNumber = frameNumber;
++    bw.producerId = producerId;
++    bw.layerId = layerId;
++    bw.width = dmabuf->width;
++    bw.height = dmabuf->height;
++    compositor->postBufferWork(std::move(bw));
+ 
+     ALOGD("wl_surface.commit: imported %dx%d buffer (fmt=0x%08x) to layer %u, frame %" PRIu64,
+           dmabuf->width, dmabuf->height, dmabuf->format, layerId, frameNumber);
+@@ -350,73 +345,32 @@ void WaylandSurface::importShmBuffer(WaylandShmBuffer* shm) {
+     }
+ 
+     PixelFormat pixFmt = shmToPixelFormat(shm->format);
+-
+-    sp<GraphicBuffer> gb = sp<GraphicBuffer>::make(
+-            static_cast<uint32_t>(shm->width), static_cast<uint32_t>(shm->height), pixFmt,
+-            1u /* layerCount */,
+-            static_cast<uint64_t>(GRALLOC_USAGE_SW_WRITE_OFTEN | GRALLOC_USAGE_HW_TEXTURE |
+-                                  GRALLOC_USAGE_HW_COMPOSER),
+-            "WaylandShm");
+-
+-    status_t err = gb->initCheck();
+-    if (err != NO_ERROR) {
+-        ALOGE("GraphicBuffer alloc failed for SHM buffer: %d (%s)", err, strerror(-err));
+-        return;
+-    }
+-
+-    void* dst = nullptr;
+-    err = gb->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, &dst);
+-    if (err != NO_ERROR || !dst) {
+-        ALOGE("GraphicBuffer lock failed: %d (%s)", err, strerror(-err));
+-        return;
+-    }
+-
+-    // Copy with BGRA→RGBA swizzle (Wayland ARGB8888 is BGRA in memory;
+-    // we allocated RGBA_8888 for Skia/SwiftShader compatibility).
+-    const uint32_t bpp = bytesPerPixel(pixFmt);
+-    const uint8_t* src = static_cast<const uint8_t*>(pixels);
+-    uint8_t* dstBytes = static_cast<uint8_t*>(dst);
+-    const uint32_t dstStride = gb->getStride() * bpp;
+     const uint32_t srcStride = static_cast<uint32_t>(shm->stride);
+-    const uint32_t w = static_cast<uint32_t>(shm->width);
+     const uint32_t h = static_cast<uint32_t>(shm->height);
+ 
+-    for (uint32_t y = 0; y < h; y++) {
+-        const uint32_t* srcRow = reinterpret_cast<const uint32_t*>(src + y * srcStride);
+-        uint32_t* dstRow = reinterpret_cast<uint32_t*>(dstBytes + y * dstStride);
+-        for (uint32_t x = 0; x < w; x++) {
+-            uint32_t px = srcRow[x]; // BGRA byte order (Wayland ARGB8888)
+-            // Swap R and B: BGRA → RGBA
+-            uint32_t b = (px >> 0) & 0xFF;
+-            uint32_t g = (px >> 8) & 0xFF;
+-            uint32_t r = (px >> 16) & 0xFF;
+-            uint32_t a = (px >> 24) & 0xFF;
+-            dstRow[x] = (a << 24) | (b << 16) | (g << 8) | r;
+-        }
+-    }
+-
+-    gb->unlock();
++    // Snapshot the pixel data from the SHM pool. This is a fast memcpy that
++    // doesn't touch gralloc, so it's safe on the Wayland dispatch thread.
++    // The heavy work (gralloc alloc + swizzle + setTransactionState) happens
++    // on the buffer thread to avoid deadlocking with Vulkan WSI clients.
++    const size_t dataSize = static_cast<size_t>(srcStride) * h;
++    std::vector<uint8_t> pixelCopy(dataSize);
++    memcpy(pixelCopy.data(), pixels, dataSize);
+ 
+     ++frameNumber;
+ 
+-    // Build transaction to set buffer + crop via the front-end path.
+-    TransactionState txn;
+-    ComposerState cs;
+-    cs.state.what = layer_state_t::eBufferChanged | layer_state_t::eCropChanged;
+-    cs.state.surface = handle;
+-    cs.state.bufferData = std::make_shared<BufferData>();
+-    cs.state.bufferData->buffer = gb;
+-    cs.state.bufferData->frameNumber = frameNumber;
+-    cs.state.bufferData->flags |= BufferData::BufferDataChange::frameNumberChanged;
+-    cs.state.bufferData->acquireFence = Fence::NO_FENCE;
+-    cs.state.bufferData->producerId = producerId;
+-    cs.state.crop = FloatRect(0, 0, shm->width, shm->height);
+-    txn.mComposerStates.push_back(std::move(cs));
+-    txn.mId = (static_cast<uint64_t>(layerId) << 32) | frameNumber;
+-    txn.mIsAutoTimestamp = true;
+-    compositor->flinger().setTransactionState(std::move(txn), /*applyToken=*/nullptr);
+-
+-    ALOGD("wl_surface.commit: imported SHM %dx%d buffer (fmt=0x%08x) to layer %u, frame %" PRIu64,
++    WaylandCompositor::BufferWork work;
++    work.handle = handle;
++    work.pixels = std::move(pixelCopy);
++    work.pixFmt = pixFmt;
++    work.srcStride = srcStride;
++    work.frameNumber = frameNumber;
++    work.producerId = producerId;
++    work.layerId = layerId;
++    work.width = shm->width;
++    work.height = shm->height;
++    compositor->postBufferWork(std::move(work));
++
++    ALOGD("wl_surface.commit: queued SHM %dx%d buffer (fmt=0x%08x) to layer %u, frame %" PRIu64,
+           shm->width, shm->height, shm->format, layerId, frameNumber);
+ }
+ 
+-- 
+2.53.0
+

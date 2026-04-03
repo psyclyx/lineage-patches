@@ -1,0 +1,96 @@
+# Maintainer: psyclyx <me@psyclyx.xyz>
+# Upstream: Mesa (https://mesa3d.org)
+#
+# Builds only the Freedreno Turnip Vulkan driver with KGSL backend support.
+# This is needed for GPU acceleration inside Linux chroots on Android devices
+# with Qualcomm Adreno GPUs, where the GPU is exposed via /dev/kgsl-3d0
+# rather than a standard DRM render node.
+#
+# This package is a drop-in replacement for Arch's vulkan-freedreno.
+#
+# NOTE: Building natively on-device is impractical (glslangValidator takes
+# 30+ minutes per shader on Snapdragon 480). Use cross-compilation or a
+# build server. See the Arch Linux ARM wiki for cross-compile setup.
+
+pkgname=vulkan-freedreno-kgsl
+pkgver=26.0.3
+pkgrel=1
+pkgdesc="Open-source Vulkan driver for Adreno GPUs — with KGSL backend for Android chroots"
+arch=(aarch64)
+url="https://mesa3d.org"
+license=(MIT AND BSD-2-Clause AND BSL-1.0)
+depends=(
+  expat
+  glibc
+  libdrm
+  libgcc
+  libstdc++
+  libx11
+  libxcb
+  libxshmfence
+  spirv-tools
+  vulkan-icd-loader
+  wayland
+  xcb-util-keysyms
+  zlib
+  zstd
+)
+makedepends=(
+  glslang
+  meson
+  python-mako
+  python-packaging
+  python-ply
+  python-pycparser
+  python-yaml
+  wayland-protocols
+  xorgproto
+  cmake
+  libxml2
+  libxrandr
+)
+provides=(vulkan-freedreno vulkan-driver)
+conflicts=(vulkan-freedreno)
+source=("https://archive.mesa3d.org/mesa-${pkgver}.tar.xz")
+sha256sums=('SKIP')
+
+build() {
+  meson setup "mesa-${pkgver}" build \
+    --prefix=/usr \
+    --buildtype=release \
+    -D platforms=x11,wayland \
+    -D gallium-drivers= \
+    -D vulkan-drivers=freedreno \
+    -D freedreno-kmds=kgsl \
+    -D gles1=disabled \
+    -D gles2=disabled \
+    -D opengl=false \
+    -D gbm=disabled \
+    -D glx=disabled \
+    -D egl=disabled \
+    -D glvnd=disabled \
+    -D llvm=disabled \
+    -D microsoft-clc=disabled \
+    -D valgrind=disabled \
+    -D b_ndebug=true
+
+  ninja -C build
+}
+
+package() {
+  DESTDIR="${pkgdir}" ninja -C build install
+
+  # Remove any extra files from the minimal build.
+  # We only want the Vulkan driver and ICD manifest.
+  local _dominated
+  for _dominated in \
+    "${pkgdir}/usr/bin" \
+    "${pkgdir}/usr/include" \
+    "${pkgdir}/usr/lib/pkgconfig" \
+  ; do
+    rm -rf "$_dominated"
+  done
+
+  install -Dm644 "mesa-${pkgver}/docs/license.rst" \
+    -t "${pkgdir}/usr/share/licenses/${pkgname}"
+}
