@@ -17,6 +17,26 @@
             </intent-filter>
         </service>
 
+        <!-- Linux Apps launcher — visible in any Android launcher -->
+        <activity
+            android:name=".WaylandAppLauncherActivity"
+            android:exported="true"
+            android:label="Linux Apps"
+            android:theme="@android:style/Theme.DeviceDefault">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Settings -->
+        <activity
+            android:name=".WaylandSettingsActivity"
+            android:exported="true"
+            android:label="Wayland Settings"
+            android:theme="@android:style/Theme.DeviceDefault" />
+
+        <!-- Per-window Activity for Wayland toplevel surfaces -->
         <activity
             android:name=".WaylandWindowActivity"
             android:exported="false"

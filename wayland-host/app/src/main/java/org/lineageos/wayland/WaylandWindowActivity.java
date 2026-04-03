@@ -1,6 +1,7 @@
 package org.lineageos.wayland;
 
 import android.app.Activity;
+import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.RemoteException;
 import android.util.Log;
@@ -9,12 +10,19 @@ import android.view.MotionEvent;
 import android.view.SurfaceControl;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.View;
+import android.view.ViewTreeObserver;
+import android.view.WindowInsets;
+import android.view.inputmethod.InputMethodManager;
+import android.widget.FrameLayout;
+import android.widget.ImageButton;
 
 /**
  * Represents one Wayland xdg_toplevel as an Android Activity.
  * Shows up in recents, taskbar, gets focus and input like a normal app.
  * Reports its window's SurfaceControl back to the compositor for reparenting.
  * Captures touch/key input and forwards to the compositor.
+ * Has a keyboard toggle button for on-screen keyboard support.
  */
 public class WaylandWindowActivity extends Activity {
     private static final String TAG = "WaylandWindowActivity";
@@ -31,7 +39,8 @@ public class WaylandWindowActivity extends Activity {
 
     private int mLayerId;
     private SurfaceView mSurfaceView;
-    private boolean mPointerInside = false;
+    private View mRootView;
+    private int mLastReportedHeight = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -45,14 +54,56 @@ public class WaylandWindowActivity extends Activity {
             setTaskDescription(new android.app.ActivityManager.TaskDescription(title));
         }
 
-        // Use a FrameLayout that respects system window insets (status bar, nav bar).
-        android.widget.FrameLayout container = new android.widget.FrameLayout(this);
-        container.setFitsSystemWindows(true);
+        // Root layout: FrameLayout with system insets
+        FrameLayout root = new FrameLayout(this);
+        root.setFitsSystemWindows(true);
+
+        // SurfaceView fills the available area
         mSurfaceView = new SurfaceView(this);
-        container.addView(mSurfaceView, new android.widget.FrameLayout.LayoutParams(
-                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
-                android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
-        setContentView(container);
+        root.addView(mSurfaceView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+
+        // Keyboard toggle button — bottom-right corner
+        ImageButton kbButton = new ImageButton(this);
+        kbButton.setImageResource(android.R.drawable.ic_dialog_dialer);
+        kbButton.setBackgroundColor(0x80000000);
+        kbButton.setPadding(16, 16, 16, 16);
+        kbButton.setAlpha(0.6f);
+        FrameLayout.LayoutParams kbParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT);
+        kbParams.gravity = android.view.Gravity.BOTTOM | android.view.Gravity.END;
+        kbParams.setMargins(0, 0, 16, 16);
+        kbButton.setLayoutParams(kbParams);
+        kbButton.setOnClickListener(v -> toggleKeyboard());
+
+        // Make the button not steal focus from the SurfaceView
+        kbButton.setFocusable(false);
+        kbButton.setFocusableInTouchMode(false);
+        root.addView(kbButton);
+
+        setContentView(root);
+        mRootView = root;
+
+        // Detect keyboard show/hide via layout changes to send resize configures
+        root.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+            Rect r = new Rect();
+            root.getWindowVisibleDisplayFrame(r);
+            int visibleHeight = r.height();
+            if (mLastReportedHeight != 0 && visibleHeight != mLastReportedHeight) {
+                // Keyboard appeared/disappeared — send resize
+                IWaylandWindowCallback callback = getCallback();
+                if (callback != null) {
+                    try {
+                        callback.onWindowResized(mLayerId, r.width(), visibleHeight);
+                    } catch (RemoteException e) {
+                        Log.w(TAG, "Failed to send keyboard resize", e);
+                    }
+                }
+            }
+            mLastReportedHeight = visibleHeight;
+        });
 
         mSurfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
@@ -102,6 +153,23 @@ public class WaylandWindowActivity extends Activity {
         super.onDestroy();
     }
 
+    private void toggleKeyboard() {
+        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (imm != null) {
+            // Create a temporary EditText to anchor the IME
+            android.widget.EditText dummy = new android.widget.EditText(this);
+            dummy.setFocusable(true);
+            dummy.setFocusableInTouchMode(true);
+            ((FrameLayout) mRootView).addView(dummy, 0, 0);
+            dummy.requestFocus();
+            imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0);
+            // Remove the dummy view after a short delay
+            dummy.postDelayed(() -> {
+                ((FrameLayout) mRootView).removeView(dummy);
+            }, 100);
+        }
+    }
+
     @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
         IWaylandWindowCallback callback = getCallback();
@@ -117,10 +185,8 @@ public class WaylandWindowActivity extends Activity {
         try {
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
-                    // Send enter + motion + button press
                     callback.onPointerMotion(mLayerId, timeMs, x, y);
                     callback.onPointerButton(mLayerId, timeMs, BTN_LEFT, true);
-                    mPointerInside = true;
                     break;
 
                 case MotionEvent.ACTION_MOVE:
@@ -140,7 +206,8 @@ public class WaylandWindowActivity extends Activity {
             Log.w(TAG, "Failed to forward touch event", e);
         }
 
-        return true;
+        // Also pass to super so the keyboard button works
+        return super.dispatchTouchEvent(event);
     }
 
     @Override
@@ -148,7 +215,6 @@ public class WaylandWindowActivity extends Activity {
         IWaylandWindowCallback callback = getCallback();
         if (callback == null) return super.onGenericMotionEvent(event);
 
-        // Handle hover events (mouse pointer without button press)
         if (event.getActionMasked() == MotionEvent.ACTION_HOVER_MOVE) {
             try {
                 callback.onPointerMotion(mLayerId, event.getEventTime(),
@@ -214,11 +280,8 @@ public class WaylandWindowActivity extends Activity {
      * Otherwise, map from Android keyCode.
      */
     private static int androidKeyToEvdev(int keyCode, int scanCode) {
-        // Hardware keyboards provide the actual evdev scan code.
         if (scanCode > 0) return scanCode;
 
-        // Software keyboard / virtual key mapping.
-        // Values from linux/input-event-codes.h
         switch (keyCode) {
             case KeyEvent.KEYCODE_ESCAPE: return 1;
             case KeyEvent.KEYCODE_1: return 2;
@@ -233,7 +296,7 @@ public class WaylandWindowActivity extends Activity {
             case KeyEvent.KEYCODE_0: return 11;
             case KeyEvent.KEYCODE_MINUS: return 12;
             case KeyEvent.KEYCODE_EQUALS: return 13;
-            case KeyEvent.KEYCODE_DEL: return 14; // Backspace
+            case KeyEvent.KEYCODE_DEL: return 14;
             case KeyEvent.KEYCODE_TAB: return 15;
             case KeyEvent.KEYCODE_Q: return 16;
             case KeyEvent.KEYCODE_W: return 17;
@@ -301,8 +364,8 @@ public class WaylandWindowActivity extends Activity {
             case KeyEvent.KEYCODE_DPAD_DOWN: return 108;
             case KeyEvent.KEYCODE_DPAD_LEFT: return 105;
             case KeyEvent.KEYCODE_DPAD_RIGHT: return 106;
-            case KeyEvent.KEYCODE_META_LEFT: return 125; // KEY_LEFTMETA
-            case KeyEvent.KEYCODE_META_RIGHT: return 126; // KEY_RIGHTMETA
+            case KeyEvent.KEYCODE_META_LEFT: return 125;
+            case KeyEvent.KEYCODE_META_RIGHT: return 126;
             default: return -1;
         }
     }

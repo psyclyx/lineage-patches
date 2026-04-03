@@ -1,0 +1,39 @@
+From c46947eeec433e6c167b57ab6e376a43f5a020ea Mon Sep 17 00:00:00 2001
+From: psyclyx <me@psyclyx.xyz>
+Date: Fri, 3 Apr 2026 00:29:17 -0700
+Subject: [PATCH] sepolicy: Allow su daemon socket connections from apps
+
+Add SELinux rules for the su daemon Unix socket:
+- Allow su domain to create/bind/listen/accept on unix_stream_socket
+- Allow untrusted_app variants to connect to su daemon socket
+
+Change-Id: I874b32b1869aa3212010a0f06a6c8e15763330b2
+---
+ private/su.te | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/private/su.te b/private/su.te
+index 122e39ffa..4c5361d13 100644
+--- a/private/su.te
++++ b/private/su.te
+@@ -17,6 +17,17 @@ allow su shell_data_file:file { read open getattr };
+ # Allow su to re-exec itself (to escape app seccomp filter)
+ allow su su_exec:file { read open getattr execute execute_no_trans };
+ 
++# Allow su daemon to create and listen on its socket
++allow su su:unix_stream_socket { create bind listen accept read write getattr setopt };
++
++# Allow apps to connect to the su daemon socket
++allow untrusted_app su:unix_stream_socket connectto;
++allow untrusted_app_25 su:unix_stream_socket connectto;
++allow untrusted_app_27 su:unix_stream_socket connectto;
++allow untrusted_app_29 su:unix_stream_socket connectto;
++allow untrusted_app_30 su:unix_stream_socket connectto;
++allow untrusted_app_32 su:unix_stream_socket connectto;
++
+ # su is permissive — access control is in the su binary, not SELinux
+ permissive su;
+ 
+-- 
+2.53.0
+
