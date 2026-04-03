@@ -193,7 +193,6 @@ public class WaylandAppLauncherActivity extends ListActivity {
         final String cmd = exec;
         new Thread(() -> {
             try {
-                // Use su 0 since chroot requires root; toybox su syntax is "su WHO COMMAND..."
                 String fullCmd = "chroot " + chrootPath + " /usr/bin/env"
                     + " PATH=/usr/bin:/bin:/usr/sbin:/sbin"
                     + " HOME=/root"
@@ -202,20 +201,14 @@ public class WaylandAppLauncherActivity extends ListActivity {
                     + " WAYLAND_DISPLAY=wayland-0"
                     + " LANG=C.UTF-8"
                     + " TERM=xterm-256color"
-                    + " " + cmd
-                    + " &";
+                    + " " + cmd;
                 Log.i(TAG, "Full command: su 0 sh -c '" + fullCmd + "'");
+                // Don't use & — the su daemon keeps the process alive.
+                // This thread blocks until the app exits, which is fine.
                 Process p = Runtime.getRuntime().exec(new String[]{
                     "su", "0", "sh", "-c", fullCmd
                 });
-                // Read stderr for debugging
-                java.io.InputStream errStream = p.getErrorStream();
-                byte[] errBuf = new byte[4096];
-                int errLen = errStream.read(errBuf);
-                String errMsg = errLen > 0 ? new String(errBuf, 0, errLen) : "";
-                int exitCode = p.waitFor();
-                Log.i(TAG, "Launch of " + entry.name + " exited with code " + exitCode
-                        + (errMsg.isEmpty() ? "" : " stderr=" + errMsg));
+                p.waitFor();
             } catch (IOException | InterruptedException e) {
                 Log.e(TAG, "Failed to launch " + entry.name, e);
             }

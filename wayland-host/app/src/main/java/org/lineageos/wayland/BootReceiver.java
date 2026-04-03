@@ -23,6 +23,16 @@ public class BootReceiver extends BroadcastReceiver {
     }
 
     private void setupChrootMounts(String chrootPath) {
+        // Wait for the su daemon socket to appear (init may not have started it yet)
+        for (int i = 0; i < 30; i++) {
+            if (new File("/dev/socket/su_daemon").exists()) break;
+            try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
+        }
+        if (!new File("/dev/socket/su_daemon").exists()) {
+            Log.e(TAG, "su daemon not available, cannot set up chroot mounts");
+            return;
+        }
+
         try {
             String[] cmds = {
                 "mount -t proc proc " + chrootPath + "/proc 2>/dev/null",
