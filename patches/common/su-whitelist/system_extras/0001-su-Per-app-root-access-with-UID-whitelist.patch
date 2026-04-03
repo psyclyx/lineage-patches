@@ -4,7 +4,7 @@ Date: Wed, 1 Apr 2026 04:49:28 -0700
 Subject: [PATCH] su: Per-app root access with UID whitelist
 
 Simple su binary that checks caller UID against a world-readable
-whitelist at /data/local/su_whitelist (one UID per line).
+whitelist at /data/system/su_whitelist (one UID per line).
 Root and shell are always allowed. Non-whitelisted callers get
 "not allowed" with no indication su exists.
 
@@ -39,7 +39,7 @@ index 1a1ab6bf..858a4733 100644
  
 +/* World-readable whitelist file, one UID per line.
 + * Managed by Settings > Developer options > Root access. */
-+#define SU_WHITELIST_PATH "/data/local/su_whitelist"
++#define SU_WHITELIST_PATH "/data/user/0/com.android.settings/files/su_whitelist"
 +
 +static bool uid_is_whitelisted(uid_t uid) {
 +    if (uid == AID_ROOT || uid == AID_SHELL) return true;

@@ -5,7 +5,6 @@ Subject: [PATCH] sepolicy: Enable su for all build variants
 
 - Move su domain setup out of userdebug_or_eng() wrapper
 - Add domain transitions for all untrusted_app variants
-- Allow su to read whitelist from /data/local (shell_data_file)
 - Allow su to re-exec itself
 - Update neverallow rules to permit app->su transitions
 - Add /system/bin/su file_contexts entry
@@ -41,7 +40,7 @@ index bdc185c73..690542452 100644
 -domain_auto_trans({ domain userdebug_or_eng(`-su') }, crash_dump_exec, crash_dump);
 +domain_auto_trans({ domain -su }, crash_dump_exec, crash_dump);
  allow domain crash_dump:process sigchld;
- 
+
  # Allow every process to check the heapprofd.enable properties to determine
 @@ -968,7 +968,7 @@ full_treble_only(`
    neverallow {
@@ -68,18 +67,18 @@ index bdc185c73..690542452 100644
 +    -su
    } vndservicemanager:binder *;
  ')
- 
+
 @@ -1367,9 +1367,9 @@ neverallow {
  } { file_type fs_type dev_type }:{ lnk_file fifo_file sock_file } mounton;
- 
+
  # Nobody should be able to execute su on user builds.
 -# On userdebug/eng builds, only dumpstate, shell, and
 -# su itself execute su.
 -neverallow { domain userdebug_or_eng(`-dumpstate -shell -su -overlay_remounter') } su_exec:file no_x_file_perms;
 +# On userdebug/eng builds, only dumpstate, shell, su, and
 +# whitelisted app domains execute su.
-+neverallow { domain -dumpstate -shell -su -overlay_remounter -untrusted_app -untrusted_app_25 -untrusted_app_27 -untrusted_app_29 -untrusted_app_30 -untrusted_app_32 } su_exec:file no_x_file_perms;
- 
++neverallow { domain -init -dumpstate -shell -su -overlay_remounter -untrusted_app -untrusted_app_25 -untrusted_app_27 -untrusted_app_29 -untrusted_app_30 -untrusted_app_32 } su_exec:file no_x_file_perms;
+
  # Do not allow the introduction of new execmod rules. Text relocations
  # and modification of executable pages are unsafe.
 @@ -1463,7 +1463,7 @@ neverallow {
@@ -89,7 +88,7 @@ index bdc185c73..690542452 100644
 -  appdomain -shell -simpleperf userdebug_or_eng(`-su') -tradeinmode -isolated_app
 +  appdomain -shell -simpleperf -su -tradeinmode -isolated_app
  }:process { transition dyntransition };
- 
+
  # Only domains spawned from zygote, runas, simpleperf_app_runner, and zygote_next may have
 @@ -1915,7 +1915,7 @@ neverallow {
      -appdomain
@@ -125,7 +124,7 @@ diff --git a/private/su.te b/private/su.te
 index fae9b987e..122e39ffa 100644
 --- a/private/su.te
 +++ b/private/su.te
-@@ -1,7 +1,31 @@
+@@ -1,7 +1,28 @@
 -userdebug_or_eng(`
 -  typeattribute su coredomain;
 +# Whitelisted su: allow all builds to use su (access control in userspace)
@@ -141,9 +140,6 @@ index fae9b987e..122e39ffa 100644
 +domain_auto_trans(untrusted_app_30, su_exec, su)
 +domain_auto_trans(untrusted_app_32, su_exec, su)
 +
-+# Allow su to read its whitelist from /data/local/
-+allow su shell_data_file:file { read open getattr };
-+
 +# Allow su to re-exec itself (to escape app seccomp filter)
 +allow su su_exec:file { read open getattr execute execute_no_trans };
 +
@@ -154,7 +150,7 @@ index fae9b987e..122e39ffa 100644
 +typeattribute su mlstrustedsubject;
 +net_domain(su)
 +vndbinder_use(su)
- 
+
 -  domain_auto_trans(shell, su_exec, su)
 +userdebug_or_eng(`
    # Allow dumpstate to call su on userdebug / eng builds to collect
@@ -163,7 +159,7 @@ index fae9b987e..122e39ffa 100644
 @@ -23,22 +47,9 @@ userdebug_or_eng(`
    # own domain.
    virtualizationservice_use(su)
- 
+
 -  # su is also permissive to permit setenforce.
 -  permissive su;
 -
@@ -171,7 +167,7 @@ index fae9b987e..122e39ffa 100644
 -
    # Do not audit accesses to keystore2 namespace for the su domain.
    dontaudit su keystore2_key_type:{ keystore2 keystore2_key } *;
- 
+
 -  typeattribute su mlstrustedsubject;
 -
 -  # Add su to various domains
@@ -183,6 +179,5 @@ index fae9b987e..122e39ffa 100644
    dontaudit su self:capability_class_set *;
    dontaudit su self:capability2 *;
    dontaudit su kernel:security *;
--- 
+--
 2.53.0
-

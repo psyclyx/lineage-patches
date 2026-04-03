@@ -81,7 +81,7 @@ index 858a4733..ec6a9821 100644
 -/* World-readable whitelist file, one UID per line.
 - * Managed by Settings > Developer options > Root access. */
 +#define SU_SOCKET_PATH "/dev/socket/su_daemon"
- #define SU_WHITELIST_PATH "/data/local/su_whitelist"
+ #define SU_WHITELIST_PATH "/data/user/0/com.android.settings/files/su_whitelist"
  
 +/* Maximum total bytes for the serialized request (args + env). */
 +#define MAX_REQUEST_SIZE (128 * 1024)

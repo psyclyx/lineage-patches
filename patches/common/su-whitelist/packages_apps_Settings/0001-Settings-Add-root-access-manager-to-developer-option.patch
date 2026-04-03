@@ -7,7 +7,7 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 Add SuAccessFragment with per-app toggles for root (su) access.
-Writes UIDs to /data/local/su_whitelist (world-readable).
+Writes UIDs to app-private files dir, world-readable for su daemon.
 Alphabetical section headers, show/hide system apps toggle.
 
 Pure AOSP Settings — no LineageOS-specific dependencies.
@@ -108,7 +108,7 @@ new file mode 100644
 index 00000000000..e3f09276cfd
 --- /dev/null
 +++ b/src/com/android/settings/development/su/SuAccessFragment.java
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,174 @@
 +/*
 + * SPDX-License-Identifier: Apache-2.0
 + */
@@ -146,7 +146,7 @@ index 00000000000..e3f09276cfd
 +    // World-readable file so su binary can read it without root.
 +    // su runs in the su SELinux domain but inherits the caller's UID
 +    // and seccomp filter, so it can't setuid or query system services.
-+    private static final String WHITELIST_PATH = "/data/local/su_whitelist";
++    private static final String WHITELIST_PATH = "/data/user/0/com.android.settings/files/su_whitelist";
 +    private static final String KEY_SHOW_SYSTEM = "show_system";
 +    private static final int MENU_SHOW_SYSTEM = Menu.FIRST;
 +
@@ -270,15 +270,14 @@ index 00000000000..e3f09276cfd
 +    private void writeWhitelist(Set<Integer> uids) {
 +        try {
 +            File f = new File(WHITELIST_PATH);
++            f.getParentFile().mkdirs();
 +            try (PrintWriter writer = new PrintWriter(new FileOutputStream(f))) {
 +                for (int uid : uids) {
 +                    writer.println(uid);
 +                }
 +            }
-+            // World-readable so su binary can check it from any UID
++            // World-readable so su daemon can read it
 +            f.setReadable(true, false);
-+            f.setWritable(false, false);
-+            f.setWritable(true, true);
 +        } catch (IOException e) {
 +            Log.e(TAG, "Failed to write whitelist", e);
 +        }
