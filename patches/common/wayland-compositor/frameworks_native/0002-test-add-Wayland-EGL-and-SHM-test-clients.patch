@@ -1,7 +1,7 @@
 From a2b5d60dd61410e8de21475b74665aa4c7912797 Mon Sep 17 00:00:00 2001
 From: psyclyx <me@psyclyx.xyz>
 Date: Thu, 2 Apr 2026 02:51:09 -0700
-Subject: [PATCH 2/2] test: add Wayland EGL and SHM test clients
+Subject: [PATCH 2/6] test: add Wayland EGL and SHM test clients
 
 Add test clients for validating the Wayland compositor:
 

@@ -1,0 +1,230 @@
+From abb086cc3aeecf1a011f01298e525e224a6c57ed Mon Sep 17 00:00:00 2001
+From: psyclyx <me@psyclyx.xyz>
+Date: Thu, 2 Apr 2026 17:06:22 -0700
+Subject: [PATCH 5/6] feat: bridge xdg_toplevel to Android Activity via binder
+ service
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When a Wayland client creates an xdg_toplevel, the compositor calls
+the WaylandWindowService via binder to launch a WaylandWindowActivity.
+The Activity appears in the Android task stack, recents, and gets
+proper window management.
+
+Pipeline:
+1. xdg_toplevel created → SF calls wayland_window_manager service
+2. Service launches WaylandWindowActivity with FLAG_ACTIVITY_NEW_TASK
+3. Activity creates SurfaceView, reports SurfaceControl back
+4. Activity shows in recents with client's title
+
+Not yet implemented:
+- Layer reparenting under Activity's SurfaceControl
+- Window destruction lifecycle callback
+- Input forwarding from Activity to Wayland client
+
+Change-Id: I7d72c9ad5dd79f2ff49a18b144dee0aa29589c6e
+---
+ .../Wayland/WaylandCompositor.cpp             | 70 +++++++++++++++++++
+ .../Wayland/WaylandCompositor.h               |  9 +++
+ .../Wayland/WaylandXdgShell.cpp               | 29 +++++++-
+ .../surfaceflinger/Wayland/WaylandXdgShell.h  |  3 +
+ 4 files changed, 109 insertions(+), 2 deletions(-)
+
+diff --git a/services/surfaceflinger/Wayland/WaylandCompositor.cpp b/services/surfaceflinger/Wayland/WaylandCompositor.cpp
+index 49a56af5c7..3ab23ca625 100644
+--- a/services/surfaceflinger/Wayland/WaylandCompositor.cpp
++++ b/services/surfaceflinger/Wayland/WaylandCompositor.cpp
+@@ -25,6 +25,8 @@
+ #include <unistd.h>
+ 
+ #include <android/gui/ISurfaceComposerClient.h>
++#include <binder/IServiceManager.h>
++#include <binder/Parcel.h>
+ #include <gui/LayerMetadata.h>
+ #include <log/log.h>
+ #include <wayland-server-protocol.h>
+@@ -291,6 +293,74 @@ void WaylandCompositor::removeSurface(struct wl_resource* resource) {
+     }
+ }
+ 
++WaylandSurface* WaylandCompositor::findSurface(struct wl_resource* wlSurface) {
++    auto it = mSurfaces.find(wlSurface);
++    return (it != mSurfaces.end()) ? it->second.get() : nullptr;
++}
++
++// AIDL transaction codes for IWaylandWindowManager (must match the generated AIDL stub).
++// These correspond to the methods in order: createWindow=1, destroyWindow=2, setTitle=3.
++enum {
++    TRANSACTION_createWindow = ::android::IBinder::FIRST_CALL_TRANSACTION + 0,
++    TRANSACTION_destroyWindow = ::android::IBinder::FIRST_CALL_TRANSACTION + 1,
++    TRANSACTION_setTitle = ::android::IBinder::FIRST_CALL_TRANSACTION + 2,
++};
++
++void WaylandCompositor::requestCreateWindow(int layerId, const sp<IBinder>& /*layerHandle*/,
++                                             const char* title, const char* appId,
++                                             int width, int height) {
++    sp<IServiceManager> sm = defaultServiceManager();
++    if (!sm) {
++        ALOGE("requestCreateWindow: no service manager");
++        return;
++    }
++    sp<IBinder> service = sm->checkService(String16("wayland_window_manager"));
++    if (!service) {
++        ALOGW("wayland_window_manager service not found, window will not be managed");
++        return;
++    }
++    ALOGI("requestCreateWindow: found service, calling createWindow for layer %d", layerId);
++
++    // Write Parcel to match the Java AIDL-generated proxy:
++    //   writeInterfaceToken(DESCRIPTOR)
++    //   writeInt(layerId)
++    //   writeString(title)
++    //   writeString(appId)
++    //   writeInt(width)
++    //   writeInt(height)
++    //   writeStrongInterface(callback)  -- null for now
++    Parcel data, reply;
++    data.writeInterfaceToken(String16("org.lineageos.wayland.IWaylandWindowManager"));
++    data.writeInt32(layerId);
++    data.writeString16(title ? String16(title) : String16());
++    data.writeString16(appId ? String16(appId) : String16());
++    data.writeInt32(width);
++    data.writeInt32(height);
++    data.writeStrongBinder(nullptr); // callback (null for now)
++
++    status_t err = service->transact(TRANSACTION_createWindow, data, &reply);
++    if (err != NO_ERROR) {
++        ALOGE("Failed to call createWindow on wayland_window_manager: %d", err);
++    } else {
++        // Read exception from reply (Java binder convention)
++        int32_t exceptionCode = reply.readExceptionCode();
++        if (exceptionCode != 0) {
++            ALOGE("createWindow threw exception: %d", exceptionCode);
++        }
++    }
++}
++
++void WaylandCompositor::requestDestroyWindow(int layerId) {
++    sp<IBinder> service = defaultServiceManager()->checkService(
++            String16("wayland_window_manager"));
++    if (!service) return;
++
++    Parcel data, reply;
++    data.writeInterfaceToken(String16("org.lineageos.wayland.IWaylandWindowManager"));
++    data.writeInt32(layerId);
++    service->transact(TRANSACTION_destroyWindow, data, &reply);
++}
++
+ void WaylandCompositor::scheduleComposite() {
+     mFlinger.scheduleComposite(SurfaceFlinger::FrameHint::kActive);
+ }
+diff --git a/services/surfaceflinger/Wayland/WaylandCompositor.h b/services/surfaceflinger/Wayland/WaylandCompositor.h
+index d7a6a54818..ae9704ac83 100644
+--- a/services/surfaceflinger/Wayland/WaylandCompositor.h
++++ b/services/surfaceflinger/Wayland/WaylandCompositor.h
+@@ -47,6 +47,15 @@ public:
+     SurfaceFlinger& flinger() { return mFlinger; }
+     void removeSurface(struct wl_resource* resource);
+ 
++    // Look up a WaylandSurface by its wl_surface resource.
++    WaylandSurface* findSurface(struct wl_resource* wlSurface);
++
++    // Request the Android WaylandWindowService to create/destroy a window.
++    void requestCreateWindow(int layerId, const sp<IBinder>& layerHandle,
++                             const char* title, const char* appId,
++                             int width, int height);
++    void requestDestroyWindow(int layerId);
++
+     // Queue frame callbacks to be fired after the next composite cycle.
+     void queueFrameCallbacks(std::vector<struct wl_resource*>&& callbacks);
+     // Fire all queued frame callbacks. Called from SF::composite() post-composition.
+diff --git a/services/surfaceflinger/Wayland/WaylandXdgShell.cpp b/services/surfaceflinger/Wayland/WaylandXdgShell.cpp
+index b9ee6fd3b4..7eb0bebaff 100644
+--- a/services/surfaceflinger/Wayland/WaylandXdgShell.cpp
++++ b/services/surfaceflinger/Wayland/WaylandXdgShell.cpp
+@@ -19,6 +19,7 @@
+ 
+ #include "WaylandXdgShell.h"
+ #include "WaylandCompositor.h"
++#include "WaylandSurface.h"
+ 
+ #include <algorithm>
+ 
+@@ -156,6 +157,17 @@ void WaylandXdgShell::xdgSurfaceGetToplevel(struct wl_client* client,
+     // Send initial configure sequence: toplevel.configure → xdg_surface.configure
+     sendToplevelConfigure(toplevel, resource);
+ 
++    // Request Android to create a window (Activity) for this toplevel.
++    // The window will reparent the Wayland layer under itself once ready.
++    WaylandSurface* ws = xdgSurface->compositor->findSurface(xdgSurface->wlSurface);
++    if (ws) {
++        xdgSurface->compositor->requestCreateWindow(
++                static_cast<int>(ws->layerId), ws->handle,
++                xdgSurface->title.empty() ? nullptr : xdgSurface->title.c_str(),
++                xdgSurface->appId.empty() ? nullptr : xdgSurface->appId.c_str(),
++                0, 0); // width/height 0 = client chooses
++    }
++
+     ALOGI("xdg_toplevel created for xdg_surface %p", resource);
+ }
+ 
+@@ -210,6 +222,11 @@ void WaylandXdgShell::toplevelDestroy(struct wl_client* /*client*/,
+                                        struct wl_resource* resource) {
+     auto* xdgSurface = static_cast<WaylandXdgSurface*>(wl_resource_get_user_data(resource));
+     if (xdgSurface) {
++        // Tell Android to close the window
++        WaylandSurface* ws = xdgSurface->compositor->findSurface(xdgSurface->wlSurface);
++        if (ws) {
++            xdgSurface->compositor->requestDestroyWindow(static_cast<int>(ws->layerId));
++        }
+         xdgSurface->toplevel = nullptr;
+     }
+     wl_resource_destroy(resource);
+@@ -220,12 +237,20 @@ void WaylandXdgShell::toplevelSetParent(struct wl_client* /*client*/,
+                                          struct wl_resource* /*parent*/) {}
+ 
+ void WaylandXdgShell::toplevelSetTitle(struct wl_client* /*client*/,
+-                                        struct wl_resource* /*resource*/, const char* title) {
++                                        struct wl_resource* resource, const char* title) {
++    auto* xdgSurface = static_cast<WaylandXdgSurface*>(wl_resource_get_user_data(resource));
++    if (xdgSurface && title) {
++        xdgSurface->title = title;
++    }
+     ALOGD("xdg_toplevel.set_title: %s", title ? title : "(null)");
+ }
+ 
+ void WaylandXdgShell::toplevelSetAppId(struct wl_client* /*client*/,
+-                                        struct wl_resource* /*resource*/, const char* appId) {
++                                        struct wl_resource* resource, const char* appId) {
++    auto* xdgSurface = static_cast<WaylandXdgSurface*>(wl_resource_get_user_data(resource));
++    if (xdgSurface && appId) {
++        xdgSurface->appId = appId;
++    }
+     ALOGD("xdg_toplevel.set_app_id: %s", appId ? appId : "(null)");
+ }
+ 
+diff --git a/services/surfaceflinger/Wayland/WaylandXdgShell.h b/services/surfaceflinger/Wayland/WaylandXdgShell.h
+index 31af184d27..e83aa83b13 100644
+--- a/services/surfaceflinger/Wayland/WaylandXdgShell.h
++++ b/services/surfaceflinger/Wayland/WaylandXdgShell.h
+@@ -20,6 +20,7 @@
+ #include <xdg-shell-server-protocol.h>
+ 
+ #include <cstdint>
++#include <string>
+ 
+ namespace android {
+ 
+@@ -32,6 +33,8 @@ struct WaylandXdgSurface {
+     struct wl_resource* wlSurface = nullptr;    // underlying wl_surface
+     struct wl_resource* toplevel = nullptr;      // xdg_toplevel (if role assigned)
+     uint32_t pendingConfigureSerial = 0;
++    std::string title;
++    std::string appId;
+ };
+ 
+ // Manages xdg_wm_base global, xdg_surface, and xdg_toplevel.
+-- 
+2.53.0
+

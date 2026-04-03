@@ -1,7 +1,7 @@
 From afadf116a670811a3387ed34c1e76ebef24a0c11 Mon Sep 17 00:00:00 2001
 From: psyclyx <me@psyclyx.xyz>
 Date: Thu, 2 Apr 2026 14:17:15 -0700
-Subject: [PATCH 3/3] fix: use transaction path for Wayland buffer commit and
+Subject: [PATCH 3/6] fix: use transaction path for Wayland buffer commit and
  layer setup
 
 Android 16's front-end architecture requires buffer and layer state

@@ -30,6 +30,12 @@ public class WaylandWindowService extends Service {
         return sInstance;
     }
 
+    IWaylandWindowCallback getCallback(int layerId) {
+        synchronized (mCallbacks) {
+            return mCallbacks.get(layerId);
+        }
+    }
+
     private final IWaylandWindowManager.Stub mBinder = new IWaylandWindowManager.Stub() {
         @Override
         public void createWindow(int layerId, String title, String appId,
@@ -84,6 +90,52 @@ public class WaylandWindowService extends Service {
                 activity.updateTitle(title);
             }
         }
+
+        @Override
+        public void sendPointerMotion(int layerId, long timeMs, float x, float y) {
+            // Forward directly to compositor callback.
+            IWaylandWindowCallback callback;
+            synchronized (mCallbacks) {
+                callback = mCallbacks.get(layerId);
+            }
+            if (callback != null) {
+                try {
+                    callback.onPointerMotion(layerId, timeMs, x, y);
+                } catch (RemoteException e) {
+                    Log.w(TAG, "Failed to forward pointer motion", e);
+                }
+            }
+        }
+
+        @Override
+        public void sendPointerButton(int layerId, long timeMs, int button, boolean pressed) {
+            IWaylandWindowCallback callback;
+            synchronized (mCallbacks) {
+                callback = mCallbacks.get(layerId);
+            }
+            if (callback != null) {
+                try {
+                    callback.onPointerButton(layerId, timeMs, button, pressed);
+                } catch (RemoteException e) {
+                    Log.w(TAG, "Failed to forward pointer button", e);
+                }
+            }
+        }
+
+        @Override
+        public void sendKey(int layerId, long timeMs, int evdevKey, boolean pressed) {
+            IWaylandWindowCallback callback;
+            synchronized (mCallbacks) {
+                callback = mCallbacks.get(layerId);
+            }
+            if (callback != null) {
+                try {
+                    callback.onKey(layerId, timeMs, evdevKey, pressed);
+                } catch (RemoteException e) {
+                    Log.w(TAG, "Failed to forward key", e);
+                }
+            }
+        }
     };
 
     @Override
@@ -128,7 +180,18 @@ public class WaylandWindowService extends Service {
         }
         if (callback != null) {
             try {
-                callback.onWindowReady(layerId, sc);
+                // Extract the layer handle IBinder from the SurfaceControl.
+                android.os.Parcel p = android.os.Parcel.obtain();
+                sc.writeToParcel(p, 0);
+                p.setDataPosition(0);
+                p.readInt(); // width
+                p.readInt(); // height
+                p.readInt(); // hasObject
+                p.readStrongBinder(); // client binder
+                IBinder handle = p.readStrongBinder(); // layer handle
+                p.recycle();
+
+                callback.onWindowReady(layerId, handle);
             } catch (RemoteException e) {
                 Log.e(TAG, "Failed to notify compositor of window ready", e);
             }

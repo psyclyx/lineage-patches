@@ -1,7 +1,7 @@
 From 01645e28df2c00e5cf4f509f897dc57aa5073651 Mon Sep 17 00:00:00 2001
 From: psyclyx <me@psyclyx.xyz>
 Date: Thu, 2 Apr 2026 14:31:17 -0700
-Subject: [PATCH 4/4] fix: dmabuf import fallback for non-minigbm gralloc (e.g.
+Subject: [PATCH 4/6] fix: dmabuf import fallback for non-minigbm gralloc (e.g.
  QTI)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

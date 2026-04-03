@@ -1,7 +1,7 @@
 From 0e300b9f6846426e6dcef6106a1f4d1f97deb1bb Mon Sep 17 00:00:00 2001
 From: psyclyx <me@psyclyx.xyz>
 Date: Thu, 2 Apr 2026 02:51:09 -0700
-Subject: [PATCH 1/2] feat: add Wayland compositor to SurfaceFlinger
+Subject: [PATCH 1/6] feat: add Wayland compositor to SurfaceFlinger
 
 Embed a Wayland compositor inside SurfaceFlinger that allows native
 Wayland clients to render into SF layers. Implements:

@@ -14,4 +14,9 @@ interface IWaylandWindowManager {
 
     // Called when the client sets a new title.
     void setTitle(int layerId, String title);
+
+    // Input events forwarded from Activity to compositor.
+    void sendPointerMotion(int layerId, long timeMs, float x, float y);
+    void sendPointerButton(int layerId, long timeMs, int button, boolean pressed);
+    void sendKey(int layerId, long timeMs, int evdevKey, boolean pressed);
 }
