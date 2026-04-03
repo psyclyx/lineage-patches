@@ -1,4 +1,4 @@
-From 422516e558769ff885c765ebd041d5a4fce01622 Mon Sep 17 00:00:00 2001
+From e5fe4e3e32c43d33ea9958a2b8c006b16c167a3a Mon Sep 17 00:00:00 2001
 From: psyclyx <me@psyclyx.xyz>
 Date: Fri, 3 Apr 2026 03:21:38 -0700
 Subject: [PATCH] feat: add SELinux policy for Wayland compositor socket
@@ -10,16 +10,16 @@ Add SELinux types and rules for the Wayland compositor:
 
 Change-Id: I9760126e174ccefea996bbf254042ffda9518559
 ---
- build/soong/service_fuzzer_bindings.go | 1 +
- contexts/file_contexts_test_data       | 2 ++
- private/file.te                        | 3 +++
- private/file_contexts                  | 1 +
- private/service.te                     | 1 +
- private/service_contexts               | 1 +
- private/shell.te                       | 5 +++++
- private/surfaceflinger.te              | 9 +++++++++
- private/system_app.te                  | 3 +++
- 9 files changed, 26 insertions(+)
+ build/soong/service_fuzzer_bindings.go |  1 +
+ contexts/file_contexts_test_data       |  2 ++
+ private/file.te                        |  3 +++
+ private/file_contexts                  |  1 +
+ private/service.te                     |  1 +
+ private/service_contexts               |  1 +
+ private/shell.te                       |  5 +++++
+ private/surfaceflinger.te              | 11 +++++++++++
+ private/system_app.te                  |  3 +++
+ 9 files changed, 28 insertions(+)
 
 diff --git a/build/soong/service_fuzzer_bindings.go b/build/soong/service_fuzzer_bindings.go
 index cb5e61fa8..82f8ebac0 100644
@@ -111,10 +111,10 @@ index 1a7e30aec..0ba712303 100644
  hal_client_domain(shell, hal_atrace)
  
 diff --git a/private/surfaceflinger.te b/private/surfaceflinger.te
-index f4f64ce4a..9119efd02 100644
+index f4f64ce4a..ee178123c 100644
 --- a/private/surfaceflinger.te
 +++ b/private/surfaceflinger.te
-@@ -80,6 +80,15 @@ userdebug_or_eng(`
+@@ -80,6 +80,17 @@ userdebug_or_eng(`
    allow surfaceflinger wm_trace_data_file:file { getattr setattr create w_file_perms };
  ')
  
@@ -126,6 +126,8 @@ index f4f64ce4a..9119efd02 100644
 +allow surfaceflinger self:unix_stream_socket { create bind listen accept read write getattr };
 +# Wayland clients pass memfds (wl_shm) over the socket; SF must read/mmap them.
 +allow surfaceflinger appdomain_tmpfs:file { read write map getattr };
++# Allow SF to find the WaylandHost window manager service for Activity bridge
++allow surfaceflinger wayland_window_manager_service:service_manager find;
 +
  # Needed to register as a Perfetto producer.
  perfetto_producer(surfaceflinger)

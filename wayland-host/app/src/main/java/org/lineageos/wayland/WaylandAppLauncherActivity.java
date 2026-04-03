@@ -8,15 +8,15 @@ import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
-import android.widget.ImageView;
 import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -24,6 +24,9 @@ import java.util.List;
 /**
  * Shows installed Linux apps from .desktop files in the configured chroot.
  * Appears as "Linux Apps" in any Android launcher.
+ *
+ * All file access goes through su since the chroot directory is not
+ * readable by the system_app SELinux domain.
  */
 public class WaylandAppLauncherActivity extends ListActivity {
     private static final String TAG = "WaylandAppLauncher";
@@ -50,28 +53,81 @@ public class WaylandAppLauncherActivity extends ListActivity {
         }
     }
 
+    /** Run a command via su and return its stdout. */
+    private String suExec(String cmd) {
+        try {
+            Process p = Runtime.getRuntime().exec(new String[]{
+                "su", "0", "sh", "-c", cmd
+            });
+            StringBuilder sb = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    sb.append(line).append('\n');
+                }
+            }
+            p.waitFor();
+            return sb.toString();
+        } catch (IOException | InterruptedException e) {
+            Log.e(TAG, "suExec failed: " + cmd, e);
+            return "";
+        }
+    }
+
     private void scanApps() {
         mApps.clear();
 
         String chrootPath = WaylandConfig.getChrootPath(this);
-        File appsDir = new File(chrootPath, "usr/share/applications");
-        if (!appsDir.isDirectory()) {
-            Log.w(TAG, "No applications directory at " + appsDir);
+        String appsDir = chrootPath + "/usr/share/applications";
+
+        // Dump all .desktop files with a separator between each
+        String output = suExec(
+            "for f in " + appsDir + "/*.desktop; do "
+            + "[ -f \"$f\" ] && echo '===FILE:'\"$f\"'===' && cat \"$f\"; "
+            + "done"
+        );
+
+        if (output.isEmpty()) {
+            Log.w(TAG, "No .desktop files found in " + appsDir);
             setListAdapter(null);
             return;
         }
 
-        File[] desktopFiles = appsDir.listFiles((dir, name) -> name.endsWith(".desktop"));
-        if (desktopFiles == null) return;
+        // Parse the concatenated output
+        String currentFile = null;
+        List<String> currentLines = new ArrayList<>();
 
-        for (File f : desktopFiles) {
-            DesktopEntry entry = parseDesktopEntry(f, chrootPath);
+        for (String line : output.split("\n")) {
+            if (line.startsWith("===FILE:") && line.endsWith("===")) {
+                if (currentFile != null) {
+                    DesktopEntry entry = parseDesktopLines(currentFile, currentLines);
+                    if (entry != null && !entry.noDisplay && entry.exec != null) {
+                        mApps.add(entry);
+                    }
+                }
+                currentFile = line.substring(8, line.length() - 3);
+                currentLines.clear();
+            } else {
+                currentLines.add(line);
+            }
+        }
+        // Handle last file
+        if (currentFile != null) {
+            DesktopEntry entry = parseDesktopLines(currentFile, currentLines);
             if (entry != null && !entry.noDisplay && entry.exec != null) {
                 mApps.add(entry);
             }
         }
 
         Collections.sort(mApps, (a, b) -> a.name.compareToIgnoreCase(b.name));
+
+        // Resolve icons via su
+        for (DesktopEntry entry : mApps) {
+            if (entry.iconName != null) {
+                entry.iconPath = resolveIconPath(chrootPath, entry.iconName);
+            }
+        }
 
         setListAdapter(new ArrayAdapter<DesktopEntry>(this,
                 android.R.layout.simple_list_item_1, mApps) {
@@ -83,14 +139,17 @@ public class WaylandAppLauncherActivity extends ListActivity {
                 text.setText(entry.name);
                 text.setCompoundDrawablePadding(24);
 
-                if (entry.iconPath != null && entry.iconPath.endsWith(".png")) {
-                    Bitmap bmp = BitmapFactory.decodeFile(entry.iconPath);
-                    if (bmp != null) {
-                        Bitmap scaled = Bitmap.createScaledBitmap(bmp, 72, 72, true);
-                        android.graphics.drawable.BitmapDrawable d =
-                                new android.graphics.drawable.BitmapDrawable(getResources(), scaled);
-                        text.setCompoundDrawablesRelativeWithIntrinsicBounds(d, null, null, null);
-                    }
+                if (entry.icon == null && entry.iconPath != null
+                        && entry.iconPath.endsWith(".png")) {
+                    entry.icon = loadIconViaSu(entry.iconPath);
+                }
+                if (entry.icon != null) {
+                    Bitmap scaled = Bitmap.createScaledBitmap(entry.icon, 72, 72, true);
+                    android.graphics.drawable.BitmapDrawable d =
+                            new android.graphics.drawable.BitmapDrawable(getResources(), scaled);
+                    text.setCompoundDrawablesRelativeWithIntrinsicBounds(d, null, null, null);
+                } else {
+                    text.setCompoundDrawablesRelativeWithIntrinsicBounds(null, null, null, null);
                 }
 
                 return view;
@@ -100,50 +159,41 @@ public class WaylandAppLauncherActivity extends ListActivity {
         Log.i(TAG, "Found " + mApps.size() + " apps in " + appsDir);
     }
 
-    private DesktopEntry parseDesktopEntry(File file, String chrootPath) {
+    private DesktopEntry parseDesktopLines(String filePath, List<String> lines) {
         DesktopEntry entry = new DesktopEntry();
-        entry.desktopFile = file.getAbsolutePath();
+        entry.desktopFile = filePath;
         boolean inDesktopEntry = false;
 
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                line = line.trim();
-                if (line.equals("[Desktop Entry]")) {
-                    inDesktopEntry = true;
-                    continue;
-                }
-                if (line.startsWith("[") && line.endsWith("]")) {
-                    inDesktopEntry = false;
-                    continue;
-                }
-                if (!inDesktopEntry) continue;
-
-                if (line.startsWith("Name=")) {
-                    entry.name = line.substring(5);
-                } else if (line.startsWith("Exec=")) {
-                    // Strip field codes (%f, %u, etc.)
-                    entry.exec = line.substring(5).replaceAll("%[fFuUdDnNickvm]", "").trim();
-                } else if (line.startsWith("Icon=")) {
-                    entry.iconName = line.substring(5);
-                } else if (line.startsWith("NoDisplay=true")) {
-                    entry.noDisplay = true;
-                } else if (line.startsWith("Type=") && !line.equals("Type=Application")) {
-                    return null; // Only show applications
-                } else if (line.startsWith("Terminal=true")) {
-                    entry.terminal = true;
-                }
+        for (String line : lines) {
+            line = line.trim();
+            if (line.equals("[Desktop Entry]")) {
+                inDesktopEntry = true;
+                continue;
             }
-        } catch (IOException e) {
-            return null;
+            if (line.startsWith("[") && line.endsWith("]")) {
+                inDesktopEntry = false;
+                continue;
+            }
+            if (!inDesktopEntry) continue;
+
+            if (line.startsWith("Name=")) {
+                entry.name = line.substring(5);
+            } else if (line.startsWith("Exec=")) {
+                entry.exec = line.substring(5).replaceAll("%[fFuUdDnNickvm]", "").trim();
+            } else if (line.startsWith("Icon=")) {
+                entry.iconName = line.substring(5);
+            } else if (line.startsWith("NoDisplay=true")) {
+                entry.noDisplay = true;
+            } else if (line.startsWith("Type=") && !line.equals("Type=Application")) {
+                return null;
+            } else if (line.startsWith("Terminal=true")) {
+                entry.terminal = true;
+            }
         }
 
         if (entry.name == null) {
-            entry.name = file.getName().replace(".desktop", "");
-        }
-
-        if (entry.iconName != null) {
-            entry.iconPath = resolveIconPath(chrootPath, entry.iconName);
+            String fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
+            entry.name = fileName.replace(".desktop", "");
         }
 
         return entry;
@@ -154,28 +204,53 @@ public class WaylandAppLauncherActivity extends ListActivity {
             return chrootPath + iconName;
         }
 
+        // Ask su to find the icon file
         String[] sizes = {"48x48", "64x64", "128x128", "scalable"};
         String[] themes = {"hicolor", "Adwaita"};
         String[] categories = {"apps", "categories", "mimetypes"};
         String[] exts = {".png", ".svg", ".xpm"};
 
+        StringBuilder testScript = new StringBuilder();
         for (String theme : themes) {
             for (String size : sizes) {
                 for (String cat : categories) {
                     for (String ext : exts) {
                         String path = chrootPath + "/usr/share/icons/" + theme + "/"
                                 + size + "/" + cat + "/" + iconName + ext;
-                        if (new File(path).exists()) return path;
+                        testScript.append("[ -f '").append(path).append("' ] && echo '")
+                                .append(path).append("' && exit 0; ");
                     }
                 }
             }
         }
-
         for (String ext : exts) {
             String path = chrootPath + "/usr/share/pixmaps/" + iconName + ext;
-            if (new File(path).exists()) return path;
+            testScript.append("[ -f '").append(path).append("' ] && echo '")
+                    .append(path).append("' && exit 0; ");
         }
 
+        String result = suExec(testScript.toString()).trim();
+        return result.isEmpty() ? null : result;
+    }
+
+    private Bitmap loadIconViaSu(String path) {
+        try {
+            Process p = Runtime.getRuntime().exec(new String[]{
+                "su", "0", "cat", path
+            });
+            InputStream is = p.getInputStream();
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = is.read(buf)) > 0) baos.write(buf, 0, n);
+            p.waitFor();
+            byte[] data = baos.toByteArray();
+            if (data.length > 0) {
+                return BitmapFactory.decodeByteArray(data, 0, data.length);
+            }
+        } catch (IOException | InterruptedException e) {
+            Log.w(TAG, "Failed to load icon: " + path);
+        }
         return null;
     }
 
@@ -203,8 +278,6 @@ public class WaylandAppLauncherActivity extends ListActivity {
                     + " TERM=xterm-256color"
                     + " " + cmd;
                 Log.i(TAG, "Full command: su 0 sh -c '" + fullCmd + "'");
-                // Don't use & — the su daemon keeps the process alive.
-                // This thread blocks until the app exits, which is fine.
                 Process p = Runtime.getRuntime().exec(new String[]{
                     "su", "0", "sh", "-c", fullCmd
                 });
@@ -223,6 +296,7 @@ public class WaylandAppLauncherActivity extends ListActivity {
         String desktopFile;
         boolean noDisplay;
         boolean terminal;
+        Bitmap icon;
 
         @Override
         public String toString() {

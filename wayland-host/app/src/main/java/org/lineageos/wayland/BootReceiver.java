@@ -13,13 +13,12 @@ public class BootReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        context.startService(new Intent(context, WaylandWindowService.class));
+        // Use device-protected storage so this works before user unlock.
+        Context deviceContext = context.createDeviceProtectedStorageContext();
 
-        // Set up chroot mounts in background
-        String chrootPath = WaylandConfig.getChrootPath(context);
-        if (new File(chrootPath, "usr").isDirectory()) {
-            new Thread(() -> setupChrootMounts(chrootPath)).start();
-        }
+        deviceContext.startService(new Intent(deviceContext, WaylandWindowService.class));
+        String chrootPath = WaylandConfig.getChrootPath(deviceContext);
+        new Thread(() -> setupChrootMounts(chrootPath)).start();
     }
 
     private void setupChrootMounts(String chrootPath) {

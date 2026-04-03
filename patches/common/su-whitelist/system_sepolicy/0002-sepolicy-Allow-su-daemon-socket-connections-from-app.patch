@@ -1,4 +1,4 @@
-From c46947eeec433e6c167b57ab6e376a43f5a020ea Mon Sep 17 00:00:00 2001
+From 0cf2f67e89e188dec646032005359f306eefa26e Mon Sep 17 00:00:00 2001
 From: psyclyx <me@psyclyx.xyz>
 Date: Fri, 3 Apr 2026 00:29:17 -0700
 Subject: [PATCH] sepolicy: Allow su daemon socket connections from apps
@@ -10,17 +10,36 @@ Add SELinux rules for the su daemon:
 
 Change-Id: I874b32b1869aa3212010a0f06a6c8e15763330b2
 ---
- private/su.te | 14 ++++++++++++++
- 1 file changed, 14 insertions(+)
+ private/domain.te |  2 +-
+ private/su.te     | 16 ++++++++++++++++
+ 2 files changed, 17 insertions(+), 1 deletion(-)
 
+diff --git a/private/domain.te b/private/domain.te
+index 054014f53..29c0e8ddb 100644
+--- a/private/domain.te
++++ b/private/domain.te
+@@ -1369,7 +1369,7 @@ neverallow {
+ # Nobody should be able to execute su on user builds.
+ # On userdebug/eng builds, only dumpstate, shell, su, and
+ # whitelisted app domains execute su.
+-neverallow { domain -init -dumpstate -shell -su -overlay_remounter -untrusted_app -untrusted_app_25 -untrusted_app_27 -untrusted_app_29 -untrusted_app_30 -untrusted_app_32 } su_exec:file no_x_file_perms;
++neverallow { domain -init -dumpstate -shell -su -overlay_remounter -system_app -untrusted_app -untrusted_app_25 -untrusted_app_27 -untrusted_app_29 -untrusted_app_30 -untrusted_app_32 } su_exec:file no_x_file_perms;
+ 
+ # Do not allow the introduction of new execmod rules. Text relocations
+ # and modification of executable pages are unsafe.
 diff --git a/private/su.te b/private/su.te
-index 122e39ffa..4c5361d13 100644
+index d84ad7d3d..d08ba7632 100644
 --- a/private/su.te
 +++ b/private/su.te
-@@ -14,6 +14,20 @@ domain_auto_trans(untrusted_app_32, su_exec, su)
+@@ -10,10 +10,26 @@ domain_auto_trans(untrusted_app_27, su_exec, su)
+ domain_auto_trans(untrusted_app_29, su_exec, su)
+ domain_auto_trans(untrusted_app_30, su_exec, su)
+ domain_auto_trans(untrusted_app_32, su_exec, su)
++domain_auto_trans(system_app, su_exec, su)
+ 
  # Allow su to re-exec itself (to escape app seccomp filter)
  allow su su_exec:file { read open getattr execute execute_no_trans };
-
+ 
 +# Allow init to start su daemon service
 +allow init su_exec:file { getattr open read execute };
 +
@@ -34,9 +53,11 @@ index 122e39ffa..4c5361d13 100644
 +allow untrusted_app_29 su:unix_stream_socket connectto;
 +allow untrusted_app_30 su:unix_stream_socket connectto;
 +allow untrusted_app_32 su:unix_stream_socket connectto;
++allow system_app su:unix_stream_socket connectto;
 +
  # su is permissive — access control is in the su binary, not SELinux
  permissive su;
-
---
+ 
+-- 
 2.53.0
+
