@@ -1,0 +1,238 @@
+From 3f52ff6ed577164b5603e6a61d39bace59c202d2 Mon Sep 17 00:00:00 2001
+From: psyclyx <me@psyclyx.xyz>
+Date: Fri, 3 Apr 2026 16:32:22 -0700
+Subject: [PATCH] fix: SHM pool refcounting and protocol error logging
+
+- Add reference counting to WaylandShmPool so the mmap stays alive as
+  long as any wl_buffer created from the pool exists. Previously, when a
+  client destroyed a wl_shm_pool while buffers were still in use, the
+  pool's mmap would be freed and subsequent memcpy in importShmBuffer
+  would SIGSEGV (SEGV_ACCERR) at the page boundary.
+
+  This is required by the Wayland wl_shm_pool spec: "The mmapped memory
+  will be released when all buffers that have been created from this pool
+  are gone."
+
+  Fixes "Lost connection to Wayland compositor" with Vulkan WSI clients
+  (MESA_VK_WSI_DEBUG=sw) which create and destroy multiple SHM pools
+  during swapchain setup.
+
+- Add bounds validation in importShmBuffer before memcpy.
+
+- Add wl_log_set_handler_server to forward libwayland protocol errors
+  to Android logcat for easier debugging.
+
+- Add client connect/disconnect logging via wl_display client listener.
+
+Change-Id: Iffbfb86fd974ac7126f84a335852d9f5c9739776
+---
+ .../Wayland/WaylandCompositor.cpp             | 43 ++++++++++++++++++-
+ .../Wayland/WaylandCompositor.h               |  1 +
+ .../surfaceflinger/Wayland/WaylandShm.cpp     | 24 ++++++++---
+ services/surfaceflinger/Wayland/WaylandShm.h  |  6 +++
+ .../surfaceflinger/Wayland/WaylandSurface.cpp | 15 +++++++
+ 5 files changed, 81 insertions(+), 8 deletions(-)
+
+diff --git a/services/surfaceflinger/Wayland/WaylandCompositor.cpp b/services/surfaceflinger/Wayland/WaylandCompositor.cpp
+index 46347c0e63..07fafe7f35 100644
+--- a/services/surfaceflinger/Wayland/WaylandCompositor.cpp
++++ b/services/surfaceflinger/Wayland/WaylandCompositor.cpp
+@@ -20,6 +20,7 @@
+ #include "WaylandCompositor.h"
+ 
+ #include <algorithm>
++#include <cstdarg>
+ #include <errno.h>
+ #include <poll.h>
+ #include <sys/eventfd.h>
+@@ -56,6 +57,28 @@ constexpr const char* kSocketDir = "/data/wayland";
+ constexpr const char* kSocketName = "wayland-0";
+ constexpr uint32_t kCompositorVersion = 4; // wl_surface up to damage_buffer (v4)
+ 
++// Forward libwayland server-side log messages to Android logcat.
++// This captures protocol errors that libwayland generates before disconnecting clients.
++void waylandLogHandler(const char* fmt, va_list args) {
++    char buf[512];
++    vsnprintf(buf, sizeof(buf), fmt, args);
++    ALOGE("libwayland: %s", buf);
++}
++
++// Listener attached to each client to log when they disconnect.
++struct ClientDestroyData {
++    struct wl_listener listener;
++    pid_t pid;
++};
++
++void onClientDestroy(struct wl_listener* listener, void* /*data*/) {
++    ClientDestroyData* d;
++    d = wl_container_of(listener, d, listener);
++    ALOGI("Wayland client pid=%d disconnected", d->pid);
++    wl_list_remove(&d->listener.link);
++    delete d;
++}
++
+ bool ensureSocketDir() {
+     struct stat st;
+     if (stat(kSocketDir, &st) == 0) {
+@@ -92,7 +115,19 @@ const struct wl_compositor_interface WaylandCompositor::kCompositorImpl = {
+ };
+ 
+ WaylandCompositor::WaylandCompositor(SurfaceFlinger& flinger)
+-      : mFlinger(flinger) {}
++      : mFlinger(flinger) {
++    mClientCreatedListener.notify = [](struct wl_listener* /*listener*/, void* data) {
++        auto* client = static_cast<struct wl_client*>(data);
++        pid_t pid;
++        wl_client_get_credentials(client, &pid, nullptr, nullptr);
++        ALOGI("Wayland client connected: pid=%d", pid);
++
++        auto* d = new ClientDestroyData();
++        d->pid = pid;
++        d->listener.notify = onClientDestroy;
++        wl_client_add_destroy_listener(client, &d->listener);
++    };
++}
+ 
+ WaylandCompositor::~WaylandCompositor() {
+     mDispatchStop = true;
+@@ -130,12 +165,18 @@ bool WaylandCompositor::init(const sp<Looper>& /*looper*/) {
+         return false;
+     }
+ 
++    // Capture libwayland protocol errors in logcat.
++    wl_log_set_handler_server(waylandLogHandler);
++
+     mDisplay = wl_display_create();
+     if (!mDisplay) {
+         ALOGE("wl_display_create failed");
+         return false;
+     }
+ 
++    // Log when new clients connect and attach a destroy listener.
++    wl_display_add_client_created_listener(mDisplay, &mClientCreatedListener);
++
+     // Remove any stale socket before binding.
+     std::string socketPath = std::string(kSocketDir) + "/" + kSocketName;
+     unlink(socketPath.c_str());
+diff --git a/services/surfaceflinger/Wayland/WaylandCompositor.h b/services/surfaceflinger/Wayland/WaylandCompositor.h
+index 1db9307319..c6bacfb319 100644
+--- a/services/surfaceflinger/Wayland/WaylandCompositor.h
++++ b/services/surfaceflinger/Wayland/WaylandCompositor.h
+@@ -122,6 +122,7 @@ private:
+     static const struct wl_compositor_interface kCompositorImpl;
+ 
+     SurfaceFlinger& mFlinger;
++    struct wl_listener mClientCreatedListener = {};
+     struct wl_display* mDisplay = nullptr;
+     struct wl_event_loop* mEventLoop = nullptr;
+     int mEventLoopFd = -1;
+diff --git a/services/surfaceflinger/Wayland/WaylandShm.cpp b/services/surfaceflinger/Wayland/WaylandShm.cpp
+index be7fbdb8fc..2128dd8d33 100644
+--- a/services/surfaceflinger/Wayland/WaylandShm.cpp
++++ b/services/surfaceflinger/Wayland/WaylandShm.cpp
+@@ -77,6 +77,7 @@ void WaylandShmPool::poolCreateBuffer(struct wl_client* client, struct wl_resour
+     buf->bufferType = WaylandBufferType::Shm;
+     buf->compositor = pool->compositor;
+     buf->pool = pool;
++    pool->ref(); // buffer holds a reference to keep the pool alive
+     buf->offset = offset;
+     buf->width = width;
+     buf->height = height;
+@@ -112,16 +113,22 @@ void WaylandShmPool::poolResize(struct wl_client* /*client*/, struct wl_resource
+     pool->size = size;
+ }
+ 
++void WaylandShmPool::unref() {
++    if (--refCount <= 0) {
++        if (data && data != MAP_FAILED) {
++            munmap(data, static_cast<size_t>(size));
++        }
++        if (fd >= 0) {
++            close(fd);
++        }
++        delete this;
++    }
++}
++
+ void WaylandShmPool::onPoolDestroy(struct wl_resource* resource) {
+     auto* pool = static_cast<WaylandShmPool*>(wl_resource_get_user_data(resource));
+     if (pool) {
+-        if (pool->data && pool->data != MAP_FAILED) {
+-            munmap(pool->data, static_cast<size_t>(pool->size));
+-        }
+-        if (pool->fd >= 0) {
+-            close(pool->fd);
+-        }
+-        delete pool;
++        pool->unref(); // drop the pool resource's reference
+     }
+ }
+ 
+@@ -141,6 +148,9 @@ void WaylandShmBuffer::onBufferDestroy(struct wl_resource* resource) {
+         if (buf->compositor) {
+             buf->compositor->notifyBufferDestroyed(resource);
+         }
++        if (buf->pool) {
++            buf->pool->unref(); // release pool reference held by this buffer
++        }
+         delete buf;
+     }
+ }
+diff --git a/services/surfaceflinger/Wayland/WaylandShm.h b/services/surfaceflinger/Wayland/WaylandShm.h
+index 92bf124a0f..52ebd55457 100644
+--- a/services/surfaceflinger/Wayland/WaylandShm.h
++++ b/services/surfaceflinger/Wayland/WaylandShm.h
+@@ -33,11 +33,17 @@ struct WaylandBufferBase {
+ };
+ 
+ // Per-pool state for wl_shm_pool (mmap'd shared memory region).
++// Reference-counted: the mmap and fd stay alive as long as any buffer
++// created from this pool exists, per the Wayland wl_shm_pool spec.
+ struct WaylandShmPool {
+     WaylandCompositor* compositor = nullptr;
+     void* data = nullptr;   // mmap'd region
+     int32_t size = 0;
+     int fd = -1;
++    int refCount = 1;       // starts at 1 for the pool resource itself
++
++    void ref() { ++refCount; }
++    void unref();
+ 
+     static void poolDestroy(struct wl_client* client, struct wl_resource* resource);
+     static void poolCreateBuffer(struct wl_client* client, struct wl_resource* resource,
+diff --git a/services/surfaceflinger/Wayland/WaylandSurface.cpp b/services/surfaceflinger/Wayland/WaylandSurface.cpp
+index 87f8a5d36c..935def74c8 100644
+--- a/services/surfaceflinger/Wayland/WaylandSurface.cpp
++++ b/services/surfaceflinger/Wayland/WaylandSurface.cpp
+@@ -338,6 +338,20 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf) {
+ }
+ 
+ void WaylandSurface::importShmBuffer(WaylandShmBuffer* shm) {
++    if (!shm->pool || !shm->pool->data) {
++        ALOGE("wl_surface.commit: SHM buffer has no pool or pool data");
++        return;
++    }
++
++    // Validate buffer bounds against the pool.
++    int64_t needed = static_cast<int64_t>(shm->offset) +
++                     static_cast<int64_t>(shm->stride) * shm->height;
++    if (needed > shm->pool->size) {
++        ALOGE("wl_surface.commit: SHM buffer exceeds pool: need %" PRId64 " have %d",
++              needed, shm->pool->size);
++        return;
++    }
++
+     const void* pixels = shm->pixelData();
+     if (!pixels) {
+         ALOGE("wl_surface.commit: SHM buffer has null pixel data");
+@@ -348,6 +362,7 @@ void WaylandSurface::importShmBuffer(WaylandShmBuffer* shm) {
+     const uint32_t srcStride = static_cast<uint32_t>(shm->stride);
+     const uint32_t h = static_cast<uint32_t>(shm->height);
+ 
++
+     // Snapshot the pixel data from the SHM pool. This is a fast memcpy that
+     // doesn't touch gralloc, so it's safe on the Wayland dispatch thread.
+     // The heavy work (gralloc alloc + swizzle + setTransactionState) happens
+-- 
+2.53.0
+
