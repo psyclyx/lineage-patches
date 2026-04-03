@@ -1,17 +1,38 @@
-From a3440e52e80a6ffeb8bcbbd5607f63cfbb9f326b Mon Sep 17 00:00:00 2001
+From 422516e558769ff885c765ebd041d5a4fce01622 Mon Sep 17 00:00:00 2001
 From: psyclyx <me@psyclyx.xyz>
-Date: Wed, 1 Apr 2026 23:39:38 -0700
+Date: Fri, 3 Apr 2026 03:21:38 -0700
 Subject: [PATCH] feat: add SELinux policy for Wayland compositor socket
+
+Add SELinux types and rules for the Wayland compositor:
+- wayland_socket_data_file for /data/wayland socket directory
+- wayland_window_manager_service for the WaylandHost binder service
+- Allow surfaceflinger, shell, and system_app appropriate access
 
 Change-Id: I9760126e174ccefea996bbf254042ffda9518559
 ---
- contexts/file_contexts_test_data | 2 ++
- private/file.te                  | 3 +++
- private/file_contexts            | 1 +
- private/shell.te                 | 5 +++++
- private/surfaceflinger.te        | 9 +++++++++
- 5 files changed, 20 insertions(+)
+ build/soong/service_fuzzer_bindings.go | 1 +
+ contexts/file_contexts_test_data       | 2 ++
+ private/file.te                        | 3 +++
+ private/file_contexts                  | 1 +
+ private/service.te                     | 1 +
+ private/service_contexts               | 1 +
+ private/shell.te                       | 5 +++++
+ private/surfaceflinger.te              | 9 +++++++++
+ private/system_app.te                  | 3 +++
+ 9 files changed, 26 insertions(+)
 
+diff --git a/build/soong/service_fuzzer_bindings.go b/build/soong/service_fuzzer_bindings.go
+index cb5e61fa8..82f8ebac0 100644
+--- a/build/soong/service_fuzzer_bindings.go
++++ b/build/soong/service_fuzzer_bindings.go
+@@ -540,6 +540,7 @@ var (
+ 		"wifirtt":                                EXCEPTION_NO_FUZZER,
+ 		"wifi_mainline_supplicant":               []string{"mainline_supplicant_service_fuzzer"},
+ 		"window":                                 EXCEPTION_NO_FUZZER,
++		"wayland_window_manager":                 EXCEPTION_NO_FUZZER,
+ 		"*":                                      EXCEPTION_NO_FUZZER,
+ 	}
+ )
 diff --git a/contexts/file_contexts_test_data b/contexts/file_contexts_test_data
 index f1a0a8708..7a2dd7451 100644
 --- a/contexts/file_contexts_test_data
@@ -51,6 +72,28 @@ index 37c74cb2f..73cb60895 100644
  # TODO(calin) label profile reference differently so that only
  # profman run as a special user can write to them
  /data/misc/profiles/cur(/[0-9]+)?   u:object_r:user_profile_root_file:s0
+diff --git a/private/service.te b/private/service.te
+index 101a9695a..18602dc1a 100644
+--- a/private/service.te
++++ b/private/service.te
+@@ -37,6 +37,7 @@ type task_continuity_service,       system_server_service, service_manager_type;
+ type tracingproxy_service,          system_server_service, service_manager_type;
+ type tradeinmode_service,           system_server_service, service_manager_type;
+ type transparency_service,          system_server_service, service_manager_type;
++type wayland_window_manager_service, service_manager_type;
+ 
+ type accessor_trusty_keymint_comm_service, service_manager_type;
+ type trusty_keymint_comm_service, service_manager_type;
+diff --git a/private/service_contexts b/private/service_contexts
+index 84304c065..94de9a42e 100644
+--- a/private/service_contexts
++++ b/private/service_contexts
+@@ -542,4 +542,5 @@ wifirtt                                   u:object_r:rttmanager_service:s0
+ wifi_usd                                  u:object_r:wifi_usd_service:s0
+ wifi_mainline_supplicant                  u:object_r:wifi_mainline_supplicant_service:s0
+ window                                    u:object_r:window_service:s0
++wayland_window_manager                    u:object_r:wayland_window_manager_service:s0
+ *                                         u:object_r:default_android_service:s0
 diff --git a/private/shell.te b/private/shell.te
 index 1a7e30aec..0ba712303 100644
 --- a/private/shell.te
@@ -87,6 +130,20 @@ index f4f64ce4a..9119efd02 100644
  # Needed to register as a Perfetto producer.
  perfetto_producer(surfaceflinger)
  
+diff --git a/private/system_app.te b/private/system_app.te
+index 020395aa8..f685969e8 100644
+--- a/private/system_app.te
++++ b/private/system_app.te
+@@ -98,6 +98,9 @@ binder_call(system_app, update_engine)
+ # Allow system app to interact with Dumpstate HAL
+ hal_client_domain(system_app, hal_dumpstate)
+ 
++# WaylandHost: register the wayland window manager service
++allow system_app wayland_window_manager_service:service_manager { add find };
++
+ allow system_app servicemanager:service_manager list;
+ # TODO: scope this down? Too broad?
+ allow system_app {
 -- 
 2.53.0
 
