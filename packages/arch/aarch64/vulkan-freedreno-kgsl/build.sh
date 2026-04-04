@@ -74,7 +74,7 @@ meson setup "$SRC_DIR" "$BUILD_DIR" \
   -D platforms=x11,wayland \
   -D gallium-drivers= \
   -D vulkan-drivers=freedreno \
-  -D freedreno-kmds=kgsl \
+  -D freedreno-kmds=kgsl,msm \
   -D gles1=disabled \
   -D gles2=disabled \
   -D opengl=false \
