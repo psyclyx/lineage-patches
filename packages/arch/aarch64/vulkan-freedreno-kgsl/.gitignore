@@ -1,7 +1,6 @@
 mesa-*.tar.xz
 mesa-*/
 build-aarch64/
-cross-build.nix
 cross-pkg-config
 meson-cross-aarch64.ini
 *.so
