@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Encabulator [Zero-Copy GPU]
+Comment=Vulkan GPU render, native dmabuf zero-copy presentation (no CPU copies)
+Exec=env GSK_RENDERER=vulkan GDK_GL=0 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/freedreno_kgsl_icd.json VK_LOADER_LAYERS_DISABLE=* MESA_VK_WSI_DEBUG=nofallback ENCABULATOR_PATH=zero-copy-gpu python3 /opt/encabulator/retroencabulator.py
+Icon=utilities-system-monitor
+Type=Application
+Categories=System;

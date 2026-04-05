@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Encabulator [Vulkan+SHM]
+Comment=Vulkan GPU render, SHM CPU-copy presentation (1 CPU copy in presentation)
+Exec=env GSK_RENDERER=vulkan GDK_GL=0 MESA_VK_WSI_DEBUG=sw MESA_LOADER_DRIVER_OVERRIDE=kgsl ENCABULATOR_PATH=vulkan-shm python3 /opt/encabulator/retroencabulator.py
+Icon=utilities-system-monitor
+Type=Application
+Categories=System;

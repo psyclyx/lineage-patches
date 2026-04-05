@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Encabulator [Cairo Software]
+Comment=Cairo CPU software render, SHM CPU-copy presentation (all CPU, no GPU)
+Exec=env GSK_RENDERER=cairo GDK_GL=disabled ENCABULATOR_PATH=cairo-software python3 /opt/encabulator/retroencabulator.py
+Icon=utilities-system-monitor
+Type=Application
+Categories=System;
