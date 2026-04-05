@@ -42,21 +42,17 @@ echo "nameserver 8.8.8.8" > "$CHROOT_DIR/etc/resolv.conf"
 # Step 4: Create mount script
 cat > "$CHROOT_DIR/../arch-mount.sh" << 'MOUNT_EOF'
 #!/system/bin/sh
-CHROOT_DIR="/data/arch"
+C="/data/arch"
 
-mount_if_needed() {
-    mountpoint -q "$2" 2>/dev/null || mount "$@"
-}
-
-mount_if_needed -t proc proc "$CHROOT_DIR/proc"
-mount_if_needed -t sysfs sysfs "$CHROOT_DIR/sys"
-mount_if_needed -o bind /dev "$CHROOT_DIR/dev"
-mount_if_needed -o bind /dev/pts "$CHROOT_DIR/dev/pts"
-mount_if_needed -t tmpfs tmpfs "$CHROOT_DIR/tmp"
+mountpoint -q "$C/proc"        || mount -t proc proc "$C/proc"
+mountpoint -q "$C/sys"         || mount -t sysfs sysfs "$C/sys"
+mountpoint -q "$C/dev"         || mount -o bind /dev "$C/dev"
+mountpoint -q "$C/dev/pts"     || mount -o bind /dev/pts "$C/dev/pts"
+mountpoint -q "$C/tmp"         || mount -t tmpfs tmpfs "$C/tmp"
 
 # Bind-mount Wayland socket directory
-mkdir -p "$CHROOT_DIR/run/wayland"
-mount_if_needed -o bind /data/wayland "$CHROOT_DIR/run/wayland"
+mkdir -p "$C/run/wayland"
+mountpoint -q "$C/run/wayland" || mount -o bind /data/wayland "$C/run/wayland"
 
 echo "Mounts ready."
 MOUNT_EOF
