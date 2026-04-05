@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Status Bar
+Comment=Sample layer-shell status bar
+Exec=python3 /root/sample-layer-bar.py
+Icon=preferences-desktop-display
+Categories=System;
+NoDisplay=false

@@ -177,6 +177,33 @@ case "${1:-help}" in
         echo "=== Done ==="
         ;;
 
+    chroot|ch)
+        # Run a command inside the Arch chroot (or open interactive shell)
+        shift
+        adb_sh "sh /data/arch-mount.sh" >/dev/null 2>&1 || true
+        if [ $# -eq 0 ]; then
+            adb_sh "sh /data/arch-enter.sh"
+        else
+            # Match the env used by WaylandAppLauncherActivity
+            adb_cmd shell "chroot /data/arch /usr/bin/env \
+                PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+                HOME=/root SHELL=/bin/bash \
+                XDG_RUNTIME_DIR=/run/wayland \
+                WAYLAND_DISPLAY=wayland-0 \
+                LANG=C.UTF-8 TERM=xterm-256color \
+                GDK_BACKEND=wayland \
+                $*"
+        fi
+        ;;
+
+    push-bar)
+        # Push sample layer-shell bar to chroot
+        SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+        adb_cmd push "$SCRIPT_DIR/sample-layer-bar.py" /data/arch/root/sample-layer-bar.py
+        adb_cmd push "$SCRIPT_DIR/sample-layer-bar.desktop" /data/arch/usr/share/applications/sample-layer-bar.desktop
+        echo "Pushed sample bar. Launch from Linux Apps or: $0 chroot python3 /root/sample-layer-bar.py"
+        ;;
+
     help|*)
         echo "Usage: $0 <command> [args...]"
         echo ""
@@ -199,5 +226,6 @@ case "${1:-help}" in
         echo "  kill-test            Kill test clients"
         echo "  props                Show build properties"
         echo "  full-test            Run full test sequence"
+        echo "  chroot [cmd]         Run command in Arch chroot (or interactive shell)"
         ;;
 esac
