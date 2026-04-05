@@ -179,20 +179,15 @@ case "${1:-help}" in
 
     chroot|ch)
         # Run a command inside the Arch chroot (or open interactive shell)
+        # Wayland env vars come from /etc/profile.d/wayland.sh via login shell
         shift
         adb_sh "sh /data/arch-mount.sh" >/dev/null 2>&1 || true
         if [ $# -eq 0 ]; then
             adb_sh "sh /data/arch-enter.sh"
         else
-            # Match the env used by WaylandAppLauncherActivity
             adb_cmd shell "chroot /data/arch /usr/bin/env \
-                PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-                HOME=/root SHELL=/bin/bash \
-                XDG_RUNTIME_DIR=/run/wayland \
-                WAYLAND_DISPLAY=wayland-0 \
-                LANG=C.UTF-8 TERM=xterm-256color \
-                GDK_BACKEND=wayland \
-                $*"
+                HOME=/root PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+                /bin/bash -lc '$*'"
         fi
         ;;
 

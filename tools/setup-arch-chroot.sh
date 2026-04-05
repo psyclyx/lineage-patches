@@ -62,7 +62,12 @@ echo "Mounts ready."
 MOUNT_EOF
 chmod +x "$CHROOT_DIR/../arch-mount.sh"
 
-# Step 5: Create enter script
+# Step 5: Install Wayland profile into chroot
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cp "$SCRIPT_DIR/wayland-profile.sh" "$CHROOT_DIR/etc/profile.d/wayland.sh"
+chmod 644 "$CHROOT_DIR/etc/profile.d/wayland.sh"
+
+# Step 6: Create enter script
 cat > "$CHROOT_DIR/../arch-enter.sh" << 'ENTER_EOF'
 #!/system/bin/sh
 CHROOT_DIR="/data/arch"
@@ -70,24 +75,16 @@ CHROOT_DIR="/data/arch"
 # Mount if needed
 sh /data/arch-mount.sh
 
-# Enter chroot
-export WAYLAND_DISPLAY=/run/wayland/wayland-0
-export XDG_RUNTIME_DIR=/tmp
-export LANG=C.UTF-8
-export TERM=xterm-256color
-
+# Enter chroot — env vars come from /etc/profile.d/wayland.sh via login shell
 chroot "$CHROOT_DIR" /bin/env \
-    WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
-    XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-    LANG="$LANG" \
-    TERM="$TERM" \
     HOME=/root \
+    TERM=linux \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     /bin/bash -l
 ENTER_EOF
 chmod +x "$CHROOT_DIR/../arch-enter.sh"
 
-# Step 6: Create first-boot setup script (run inside chroot)
+# Step 7: Create first-boot setup script (run inside chroot)
 cat > "$CHROOT_DIR/root/first-setup.sh" << 'SETUP_EOF'
 #!/bin/bash
 # Run this inside the chroot after first entering it.
